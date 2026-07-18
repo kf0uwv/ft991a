@@ -4,8 +4,23 @@ Date: 2026-07-15
 
 ## Status
 
-Accepted. **Not started** — blocked on `radio-cat-rs` extraction and/or an
-explicit go-ahead (see "Consequences").
+Accepted. **Implementation started 2026-07-17.** All three blocking
+conditions recorded below have cleared:
+
+1. `radio-cat-rs` (https://github.com/kf0uwv/radio-cat-rs) has extracted and
+   pushed `cat-framework`, `cat-client`, `cat-transport-core`, and
+   `cat-transport-serial` to `origin/main` (commit `0c13844` at the time of
+   this update). The sibling `ts570d` repository has already migrated onto
+   these as git dependencies — see `ts570d/Cargo.toml` for the exact
+   dependency syntax this repository mirrors.
+2. The official Yaesu FT-991A CAT Operation Reference Manual
+   (`FT-991A_CAT_OM_ENG_1711-D.pdf`, downloaded from yaesu.com) has been
+   added to this repository at `docs/manuals/`.
+3. The user has given an explicit go-ahead to begin implementation.
+
+See `planning/architect/task_plan.md` for the resulting workspace design,
+first-slice `FT991A_COMMAND_TABLE` scope (cited against the manual), and
+dispatch queue.
 
 ## Context
 
@@ -110,17 +125,24 @@ This repo therefore inherits the same serial/TCP/UDP/mock readiness `ts570d`
 built for itself, without having to redesign it — because it is consuming
 the same shared abstraction, not reinventing one.
 
-### Status: blocked, not started
+### Status: unblocked, implementation underway
 
-No Rust code, `Cargo.toml`, or command implementation exists in this
-repository. This ADR records intent and boundary only. Work does not begin
-until:
+As of 2026-07-17, all three preconditions below are satisfied and
+implementation dispatch has begun per `planning/architect/task_plan.md`:
 
-1. `radio-cat-rs` has extracted and published at least `cat-framework` (and
-   ideally `cat-client`/`CatSession`) in a state this repo can depend on; and
-2. an explicit architect/user go-ahead to start implementation; and
-3. the official Yaesu FT-991A CAT manual is available in this repository for
-   the `yaesu` agent to work from.
+1. `radio-cat-rs` has extracted and published `cat-framework`, `cat-client`,
+   `cat-transport-core`, and `cat-transport-serial` in a state this repo can
+   depend on (git dependencies, `branch = "main"`, mirroring `ts570d`'s
+   post-remap `Cargo.toml`); and
+2. an explicit architect/user go-ahead to start implementation has been
+   given; and
+3. the official Yaesu FT-991A CAT manual is available in this repository at
+   `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf` for the `yaesu` agent to work
+   from.
+
+This ADR's decision record above (shape of a second radio, dependency
+boundary, `CatSession` genericity) remains the binding design; this section
+now records that the blocker it previously described no longer holds.
 
 ## Consequences
 

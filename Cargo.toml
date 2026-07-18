@@ -1,0 +1,131 @@
+[workspace]
+# Real workspace shape (supersedes the `yaesu` agent's minimal placeholder,
+# which only listed `members = ["radio"]"` to give that crate a workspace
+# root to build/test/lint against). This is the `app` agent's Wave 1 Task 2
+# deliverable — see `planning/architect/task_plan.md` §1/§5 and
+# `planning/app/task_plan.md`.
+#
+# `emulator` is deliberately NOT a member yet — deferred to its own
+# dispatch wave (not needed to build/test `radio`/`ui`/the wiring binary;
+# see architect task_plan.md §5 "Why no ui/emulator implementation work
+# this wave").
+members = ["radio", "ui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Matt Franklin <radiombf@gmail.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/kf0uwv/ft991a"
+repository = "https://github.com/kf0uwv/ft991a"
+description = "Yaesu FT-991A Radio Control with io_uring"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async runtime (io_uring-based, Linux-only) — same pin as ts570d/Cargo.toml
+monoio = { version = "0.2.3" }
+local-sync = "0.1.1"
+
+# Async trait support (compatible with !Send futures for monoio)
+async-trait = "0.1"
+
+# Terminal UI (centralized here for Wave 2's real ratatui TUI; the Wave 1
+# `ui` crate stub does not use these yet)
+ratatui = { version = "0.26.3", features = ["crossterm"] }
+crossterm = { version = "0.27.0", features = ["event-stream"] }
+
+# Error handling
+thiserror = "1.0.61"
+
+# Serialization (for radio commands/protocols)
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+
+# Logging
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+# Utilities
+bytes = "1.6.0"
+futures = "0.3.30"
+
+# Linux-specific
+libc = "0.2.153"
+nix = "0.27.1"
+
+# Testing
+tempfile = "3.10.1"
+mockall = "0.12.1"
+
+# Generic CAT engine + transports, from https://github.com/kf0uwv/radio-cat-rs
+# (see docs/adr/0001-second-radio-on-shared-cat-framework.md). Floating on
+# `branch = "main"` while both repos co-evolve pre-1.0, mirroring
+# ts570d/Cargo.toml's dependency syntax exactly.
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+
+[package]
+name = "ft991a"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ft991a"
+path = "src/main.rs"
+
+[dependencies]
+monoio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+libc = { workspace = true }
+
+# CAT transport crate — provides SerialCatSession/SerialConfig/SerialPort,
+# the only pieces main.rs names directly. cat-transport-core is a
+# transitive dependency (via cat-transport-serial), never named directly
+# here.
+cat-transport-serial = { workspace = true }
+
+# Local workspace crates
+radio = { path = "radio" }
+ui = { path = "ui" }
+
+[dev-dependencies]
+radio = { path = "radio" }
+monoio = { workspace = true }
+cat-transport-serial = { workspace = true }
+
+[features]
+default = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+debug = true
+
+# Platform-specific configuration
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-specific dependencies for io_uring and serial handling
+# libc is already included above
+
+# Metadata for documentation and packaging
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+# Build requirements documentation
+[package.metadata.build]
+# Note: This application requires Linux kernel 5.1+ for io_uring support
+# Build command: cargo build --release
+# Test command: cargo test
+# Lint command: cargo clippy && cargo fmt

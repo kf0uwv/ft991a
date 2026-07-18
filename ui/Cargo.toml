@@ -1,0 +1,28 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Placeholder terminal interface for FT-991A (Wave 1 stub — real ratatui TUI lands in Wave 2)"
+rust-version.workspace = true
+
+[dependencies]
+# FT-991A `Radio` trait + domain types — the only thing this crate depends
+# on, per CLAUDE.md's dependency model (`ui` never imports a transport
+# crate directly).
+radio = { path = "../radio" }
+
+# Async runtime
+monoio = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Only used by the in-crate MockRadio test fixture, to implement the
+# `#[async_trait(?Send)]`-defined `radio::Radio` trait.
+async-trait = { workspace = true }
+
+[features]
+default = []

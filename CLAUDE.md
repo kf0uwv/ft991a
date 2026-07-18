@@ -1,25 +1,36 @@
 # Yaesu FT-991A Radio Control - Agent Guidelines
 
-## Current Status: SCAFFOLDING ONLY — no implementation yet
+## Current Status: IMPLEMENTATION UNDERWAY (started 2026-07-17)
 
-There is no Rust code, no `Cargo.toml`, and no crate in this repository. Do
-**not** run `cargo init`, do **not** write `.rs` files, and do **not**
-implement any FT-991A CAT command until:
+All three preconditions that previously blocked implementation have
+cleared:
 
-1. the shared-library repo `radio-cat-rs` has published `cat-framework`
-   (and ideally `cat-client`/`CatSession`) in a state this repo can depend
-   on;
-2. the official Yaesu FT-991A CAT operation reference manual has been added
-   to this repository for the `yaesu` agent to work from; and
+1. the shared-library repo `radio-cat-rs` has published `cat-framework`,
+   `cat-client`, `cat-transport-core`, and `cat-transport-serial` as
+   consumable git dependencies (`branch = "main"`), and the sibling `ts570d`
+   repo has already migrated onto them — see `ts570d/Cargo.toml` for the
+   exact dependency syntax this repo mirrors;
+2. the official Yaesu FT-991A CAT Operation Reference Manual is checked in
+   at `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf`; and
 3. the architect/user has given an explicit go-ahead.
 
-See `docs/adr/0001-second-radio-on-shared-cat-framework.md` for the full
-decision record and blocked status, and `docs/adr/README.md` for a running
-status summary. Every rule below describes the architecture this repo will
-have once unblocked — it is binding on future implementation work, not a
-description of anything that exists today.
+There is still no `Cargo.toml` or crate checked in as of this update — see
+`planning/architect/task_plan.md` for the workspace design (crate layout,
+dependency versions, the resolved `serial`-crate decision) and the dispatch
+queue that produces it. Subagents dispatched against that plan **should**
+run `cargo init`/create `Cargo.toml` files/write `.rs` files within their
+own owned directories (`radio/`, `ui/`, `emulator/`, `src/`) — the blanket
+prohibition below is superseded for this work. Agents should still check
+`docs/adr/0001-second-radio-on-shared-cat-framework.md` and
+`docs/adr/README.md` at the start of a session as a sanity check, not assume
+this status is permanent or applies to directories outside their own scope.
 
-## Superpowers Coding Model (MANDATORY, once implementation starts)
+See `docs/adr/0001-second-radio-on-shared-cat-framework.md` for the full
+decision record, and `docs/adr/README.md` for a running status summary.
+Every rule below describes the architecture this repo now implements — it
+is binding on implementation work.
+
+## Superpowers Coding Model (MANDATORY)
 - Use planning-with-files skill for ALL implementation work
 - Follow TDD, frequent commits, verification-before-completion
 - Check for applicable skills BEFORE any action
@@ -30,7 +41,10 @@ description of anything that exists today.
 - Planning files include: `task_plan.md`, `findings.md`, `progress.md` in each agent's directory
 - This prevents conflicts between agents working on different aspects of the project
 - Planning files must be created and maintained before any implementation work
-- These directories already exist with starter `task_plan.md` files recording the blocked status above — update them in place, do not replace the convention
+- These directories already exist with starter `task_plan.md` files; the
+  `architect` directory's has been updated to reflect the unblocked status
+  above as of 2026-07-17 — update the others in place as each agent is
+  dispatched, do not replace the convention
 
 ## Planning Directory Ownership and Boundaries
 - Each agent owns ONLY their planning directory under `./planning/{agent_name}/`
@@ -47,24 +61,26 @@ description of anything that exists today.
 - The architect coordinates parallelization across subagents
 - No subagent proceeds past planning without architect approval
 
-## Core Technologies (once implementation starts)
+## Core Technologies
 - monoio: io_uring async runtime — same as `ts570d`; tokio is NEVER used
 - ratatui + crossterm: Terminal UI
 - Shared CAT engine and transport abstractions consumed from `radio-cat-rs`
-  (crate names expected: `cat-framework`, `cat-client`, `cat-transport-serial`,
-  `cat-transport-tcp`, `cat-transport-udp` — exact names are set by that
-  repo, not this one)
+  as git dependencies (`branch = "main"`): `cat-framework`, `cat-client`,
+  `cat-transport-core`, `cat-transport-serial` — see
+  `planning/architect/task_plan.md` for the exact `Cargo.toml` shape,
+  mirroring `ts570d/Cargo.toml`
 - FT-991A protocol emulator with virtual TTY, for testing without hardware
+  (a later dispatch wave — see `planning/architect/task_plan.md`)
 
 ## Essential Commands
-No `Cargo.toml` exists yet — none of these are runnable today. Recorded for
-when a workspace is created:
+No `Cargo.toml` exists yet as of this update — none of these are runnable
+today. Recorded for when the `app` agent's workspace-scaffolding task lands:
 - Build: `cargo build` / `cargo build --release`
 - Test: `cargo test` / `cargo test test_name`
 - Lint: `cargo clippy` / `cargo fmt`
 - Emulator: `cargo run --bin emulator`
 
-## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW, once crates exist)
+## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
 
 This project depends on a **shared, radio-independent generic CAT engine**
 published by the `radio-cat-rs` repository, rather than defining its own
@@ -83,9 +99,16 @@ cat-framework  (external crate, from radio-cat-rs — NOT part of this repo)
   └── contains NO radio-specific command ids, modes, frequencies, state, or handlers
   └── this repo NEVER forks, vendors, or duplicates this crate locally
 
-serial  (depends on: cat-framework / cat-transport-serial — see .claude/agents/serial.md;
-          whether this repo reimplements a transport or wraps cat-transport-serial
-          is an OPEN DECISION, not yet made)
+cat-transport-serial  (external crate, from radio-cat-rs — NOT part of this repo)
+  └── DECIDED (planning/architect/task_plan.md, 2026-07-17): this repo has
+      NO local `serial` crate. `cat-transport-serial` already provides a
+      real io_uring `SerialPort`/`SerialConfig`/`SerialCatSession` — the
+      FT-991A's documented CAT serial behavior (4800/9600/19200/38400 baud,
+      standard 8-data-bit/no-parity RS-232C framing, optional RTS/CTS
+      hardware handshake, ';'-terminated frames) is fully covered by the
+      existing `SerialConfig`/`FlowControl` surface with no code changes.
+      Reimplementing it locally here would recreate the exact duplication
+      `ts570d` eliminated by extracting it.
 
 radio  (depends on: cat-framework only)
   └── defines: Ft991aCommandId, FT991A_COMMAND_TABLE (the single command table)
@@ -98,7 +121,7 @@ radio  (depends on: cat-framework only)
 ui  (depends on: cat-framework + radio)
   └── uses: radio::Radio trait abstraction (ui::run<R: Radio>(radio: &mut R))
   └── uses: radio domain types (Frequency, Mode, ...) for display
-  └── NEVER imports from serial or any transport crate
+  └── NEVER imports cat-transport-serial or any other transport crate
 
 emulator  (depends on: cat-framework + radio)
   └── runs CatFramework<Ft991aRadio>; owns PTY hosting, logging, TUI display
@@ -118,8 +141,8 @@ app/src/main.rs  (depends on: all crates — the wiring layer only)
    must be derived from the official Yaesu FT-991A manual — never assumed
    from `ts570d`'s TS-570D table.
 4. **`ui`** may depend on `radio` (for the `Radio` trait and domain types)
-   but NEVER on `serial` or any transport crate. It uses the `Radio` trait,
-   not concrete transports or sessions.
+   but NEVER on `cat-transport-serial` or any transport crate. It uses the
+   `Radio` trait, not concrete transports or sessions.
 5. **`app/main.rs`** is the ONLY place concrete types are wired together.
 6. Unit tests use **mock/fake implementations** of the relevant trait —
    never the real impl from another crate.
@@ -153,28 +176,30 @@ synthesizer, antenna tuner, menu access — the FT-991A's own distinguishing
 features, once identified from its manual) live in the `radio` crate as
 inherent methods on `Ft991a`, NOT in the `Radio` trait.
 
-## Architecture (once implementation starts)
+## Architecture
 - `radio/`: FT-991A command table, `CatRadio` impl, controller client, `Radio` trait + domain types
-- `ui/`: Ratatui terminal interface (depends on `cat-framework` + `radio`)
-- `serial/`: transport layer — shape not yet decided, see `.claude/agents/serial.md`
-- `emulator/`: Virtual TTY + radio emulator, runs `CatFramework<Ft991aRadio>`
+- `ui/`: Ratatui terminal interface (depends on `cat-framework` + `radio`) — later dispatch wave
+- No local `serial/` crate — transport is `cat-transport-serial` (external, see above)
+- `emulator/`: Virtual TTY + radio emulator, runs `CatFramework<Ft991aRadio>` — later dispatch wave
 - No `docs/architecture/network-readiness.md`-equivalent exists yet in this
   repo; `ts570d`'s copy documents the pattern this repo will inherit once its
   `CatSession` usage is implemented.
 
-## Code Style (once implementation starts)
+## Code Style
 - Imports: std → external → local
 - Error handling: thiserror + Result<T, E>
 - Naming: snake_case/PascalCase conventions
 - Async: monoio runtime throughout — tokio is NEVER used
 
-## Testing Strategy (once implementation starts)
-- Unit tests for individual components
-- Integration tests with virtual TTY
+## Testing Strategy
+- Unit tests for individual components (e.g. `radio` crate tests drive
+  `cat_framework::CatFramework<Ft991aRadio>` directly, in-process — no PTY
+  needed for command-table/state-machine coverage, mirroring `ts570d`)
+- Integration tests with virtual TTY, once the `emulator` crate lands
 - Linux-only testing with emulator (matching `ts570d`'s io_uring constraint)
 
-## Linux-Specific (once implementation starts)
-- io_uring kernel requirements (5.1+), if this repo implements its own serial
-  transport rather than consuming `cat-transport-serial`
+## Linux-Specific
+- io_uring kernel requirements (5.1+) — provided by `cat-transport-serial`,
+  not reimplemented locally
 - Serial port permissions and udev rules
 - Virtual TTY via pseudo-terminals

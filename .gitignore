@@ -1,0 +1,17 @@
+# Build directories
+target/
+Cargo.lock
+
+# Manual PDF (large binary — download via docs/README.md or from Yaesu's website)
+docs/manuals/*.pdf
+
+# IDE
+.idea/
+node_modules/
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+*.deb

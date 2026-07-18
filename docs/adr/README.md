@@ -9,20 +9,22 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 
 ## Repository status
 
-**No implementation.** This repository contains scaffolding only: ADRs,
-`.claude/agents/` subagent definitions, `planning/` directories, and root
-`README.md`/`CLAUDE.md`. There is no `Cargo.toml`, no crate, no CAT command
-implementation, and no FT-991A manual checked in yet.
+**Implementation underway (started 2026-07-17).** All three blockers
+recorded in [ADR 0001](0001-second-radio-on-shared-cat-framework.md) have
+cleared:
 
-**Blocked on:**
-- Extraction of `cat-framework` (and, ideally, `cat-client`/`CatSession` and
-  at least one `cat-transport-*` crate) into the `radio-cat-rs` shared-library
-  repository, per `ts570d` ADRs 0001, 0004, and 0005.
-- An explicit architect/user go-ahead to begin implementation once the
-  shared library is consumable.
-- Acquisition of the official Yaesu FT-991A CAT operation reference manual
-  into this repo (see `.claude/agents/yaesu.md`) — no command table work can
-  start without it.
+- `cat-framework`, `cat-client`, `cat-transport-core`, and
+  `cat-transport-serial` are published and consumable from the
+  `radio-cat-rs` shared-library repository (git dependencies, `branch =
+  "main"`), per `ts570d` ADRs 0001, 0004, and 0005 and `ts570d`'s own
+  post-remap `Cargo.toml`.
+- The architect/user go-ahead to begin implementation has been given.
+- The official Yaesu FT-991A CAT Operation Reference Manual is checked in at
+  `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf`.
+
+There is still no `Cargo.toml` or crate checked in as of this planning
+update — see `planning/architect/task_plan.md` for the workspace design and
+dispatch queue that will produce it.
 
 See [ADR 0001](0001-second-radio-on-shared-cat-framework.md) for the full
 decision record.

@@ -1,0 +1,34 @@
+[package]
+name = "radio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Yaesu FT-991A protocol handling"
+rust-version.workspace = true
+
+[dependencies]
+# Generic CAT engine + client mechanics, external from radio-cat-rs — see
+# docs/adr/0001-second-radio-on-shared-cat-framework.md.
+cat-framework = { workspace = true }
+cat-client = { workspace = true }
+cat-transport-core = { workspace = true }
+
+# Runtime
+monoio = { workspace = true }
+
+# Async traits
+async-trait = "0.1"
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+# Test-only: wire-framing-level unit tests. Never used by production code
+# (radio never depends on a concrete transport crate).
+cat-transport-serial = { workspace = true }
+
+[features]
+default = []
