@@ -12,26 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! FT-991A Terminal UI — Wave 1 placeholder.
+//! FT-991A Terminal UI — Wave 2 real ratatui interface.
 //!
-//! This crate is a genuinely minimal stub: [`run`] does nothing but
-//! immediately return `Ok(())`. It exists only so `app`'s `src/main.rs`
-//! (this repo's application wiring layer) has something concrete to hand
-//! the constructed [`radio::Radio`] implementation to, unblocking the
-//! workspace build.
+//! A flat single-screen TUI, right-sized for this repo's 11-command first
+//! slice — NOT a port of `ts570d/ui`'s ~60-command three-level menu tree.
+//! See `planning/architect/task_plan.md` §6 for the full design rationale.
 //!
-//! The real ratatui terminal interface (mirroring `ts570d/ui`'s layout,
-//! widgets, and live-updating fields) is Wave 2's job, once the `radio`
-//! crate's `Radio` trait surface has been reviewed and approved — see
-//! `planning/architect/task_plan.md` §5. Per this repo's `CLAUDE.md`
-//! dependency model, `ui` depends on `radio` only and never imports a
-//! transport crate directly, even once the real TUI lands.
+//! Per this repo's `CLAUDE.md` dependency model, `ui` depends on `radio`
+//! only (for the [`radio::Radio`] trait and domain types) and never imports
+//! a transport crate directly.
+
+pub(crate) mod control;
+pub(crate) mod layout;
+mod terminal;
+
+pub use terminal::run;
+
+use radio::{Mode, TxState};
 
 /// Errors that can occur while running the UI.
-///
-/// Currently unused by [`run`] (the stub never fails) — kept as a real
-/// `thiserror` type now so Wave 2's terminal-setup/render error paths can
-/// grow this enum without changing `run`'s signature.
 #[derive(Debug, thiserror::Error)]
 pub enum UiError {
     #[error("IO error: {0}")]
@@ -41,13 +40,64 @@ pub enum UiError {
 /// Convenience [`Result`] alias for UI operations.
 pub type UiResult<T> = Result<T, UiError>;
 
-/// Run the terminal UI against a live [`radio::Radio`] implementation.
+/// Live radio state for UI rendering.
 ///
-/// Wave 1 placeholder: does nothing and returns immediately. Wave 2
-/// replaces this body with the real ratatui event loop; the signature is
-/// expected to stay stable (mirrors `ts570d::ui::run`'s shape).
-pub async fn run<R: radio::Radio + 'static>(_radio: R) -> UiResult<()> {
-    Ok(())
+/// Mirrors `ts570d::ui::RadioDisplay`'s *role* (a plain snapshot struct
+/// polled from the `Radio` trait), not its field list — RIT/XIT/split/
+/// memory/antenna/AGC/etc. don't exist in this first slice. See
+/// `planning/architect/task_plan.md` §6.2.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ft991aDisplay {
+    pub vfo_a_hz: u64,
+    pub vfo_b_hz: u64,
+    pub mode: Mode,
+    pub tx_state: TxState,
+    /// 0-255, read-only.
+    pub smeter: u8,
+    pub power_on: bool,
+    /// 0-255.
+    pub af_gain: u8,
+    /// 0-255.
+    pub rf_gain: u8,
+    /// 0-100 (NOT 255 — squelch has its own, narrower range; see
+    /// `radio/src/ft991a.rs`'s `get_squelch`/`set_squelch` doc comments).
+    pub squelch: u8,
+    /// TX power, watts, 5-100 (`PC`).
+    pub power_watts: u8,
+    /// Fetched once at startup, not polled per-tick — `ID` is a fixed
+    /// protocol constant (`"0670"`).
+    pub id: String,
+    /// Errors from the most recent poll cycle.
+    pub poll_errors: Vec<String>,
+    /// `false` when the radio has been unresponsive for 3 consecutive poll
+    /// cycles.
+    pub connected: bool,
+    /// `true` from startup until the first poll cycle completes.
+    pub initializing: bool,
+}
+
+impl Default for Ft991aDisplay {
+    fn default() -> Self {
+        Self {
+            vfo_a_hz: 14_000_000,
+            vfo_b_hz: 14_100_000,
+            // `Mode` has no `Default` impl in `radio_trait.rs` — `Usb` is
+            // picked explicitly here, matching ts570d's own default-mode
+            // choice and the FT-991A's most common general-coverage mode.
+            mode: Mode::Usb,
+            tx_state: TxState::Off,
+            smeter: 0,
+            power_on: false,
+            af_gain: 200,
+            rf_gain: 255,
+            squelch: 0,
+            power_watts: 100,
+            id: String::new(),
+            poll_errors: Vec::new(),
+            connected: true,
+            initializing: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -68,12 +118,6 @@ mod tests {
         }
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn test_run_returns_ok_immediately() {
-        let radio = MockRadio;
-        assert!(run(radio).await.is_ok());
-    }
-
     #[test]
     fn test_ui_error_wraps_io_error() {
         let io_err = std::io::Error::other("boom");
@@ -81,10 +125,29 @@ mod tests {
         assert!(matches!(ui_err, UiError::Io(_)));
     }
 
-    // Compile-time check only: RadioError must not appear directly in this
-    // crate's public surface yet (Wave 1 stub does not call any Radio
-    // methods) — referencing the type keeps the import from going stale
-    // without adding a runtime assertion for something not yet exercised.
+    #[test]
+    fn test_display_default_uses_usb_mode() {
+        let d = Ft991aDisplay::default();
+        assert_eq!(d.mode, Mode::Usb);
+    }
+
+    #[test]
+    fn test_display_default_starts_initializing_and_connected() {
+        let d = Ft991aDisplay::default();
+        assert!(d.initializing);
+        assert!(d.connected);
+        assert!(d.poll_errors.is_empty());
+    }
+
+    // Compile-time check only: MockRadio must satisfy `Radio + 'static` for
+    // `run`'s bound, without needing every method implemented (trait's
+    // default bodies return `RadioError::NotImplemented`).
+    #[allow(dead_code)]
+    fn _mock_radio_satisfies_run_bound() {
+        fn assert_bound<R: Radio + 'static>() {}
+        assert_bound::<MockRadio>();
+    }
+
     #[allow(dead_code)]
     fn _radio_error_type_is_reachable(_e: RadioError) {}
 }

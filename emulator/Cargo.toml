@@ -1,0 +1,44 @@
+[package]
+name = "emulator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Virtual TTY and radio emulator for FT-991A"
+rust-version.workspace = true
+
+[[bin]]
+name = "emulator"
+path = "src/main.rs"
+
+[dependencies]
+# Radio command table (approved architecture exception — emulator is test infrastructure)
+radio = { path = "../radio" }
+# Only CatFramework is used (generic dispatch engine) — approved architecture
+# exception, same as the `radio` dependency above.
+cat-framework = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization for JSON logging
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# PTY creation via serialport-rs (TTYPort::pair() creates a pseudo-terminal pair)
+serialport = "4"
+
+# Signal handling for standalone binary
+ctrlc = "3.0"
+
+# Terminal UI for LCD-style display
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+mockall = { workspace = true }
+libc = { workspace = true }
+
+[features]
+default = []

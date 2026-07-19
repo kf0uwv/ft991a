@@ -126,9 +126,13 @@ fn parse_args() -> Args {
     }
 }
 
-/// Entry point.  Uses monoio's io_uring runtime (single-threaded, !Send).
-#[monoio::main(timer_enabled = true)]
-async fn main() {
+/// The actual application logic, shared by both platform entry points below:
+/// initialize logging, parse args, open the serial port, construct the
+/// typed FT-991A client, and run the UI event loop. Platform-neutral —
+/// `SerialPort`/`SerialConfig`/`Ft991a`/`ui::run` all behave identically on
+/// Linux and Windows (see `radio-cat-rs` ADR 0004). Only *what drives this
+/// future to completion* differs per platform; see `main` below.
+async fn run_app() {
     // 1. Initialize logging — use RUST_LOG env var to control verbosity.
     tracing_subscriber::fmt().with_env_filter("info").init();
 
@@ -137,9 +141,10 @@ async fn main() {
     // 2. Parse CLI arguments.
     let args = parse_args();
 
-    // 3. Open the port via the io_uring serial driver.
-    //    SerialPort::open must be called inside an active monoio runtime
-    //    because it registers the fd with io_uring.
+    // 3. Open the port via the platform serial backend (io_uring on Linux,
+    //    a worker-thread-backed COM port on Windows — see ADR 0004). On
+    //    Linux this must be called inside an active monoio runtime because
+    //    it registers the fd with io_uring.
     let port = SerialPort::open(
         &args.port,
         SerialConfig {
@@ -165,4 +170,109 @@ async fn main() {
     }
 
     info!("Application stopped");
+}
+
+/// Linux entry point. Uses monoio's io_uring runtime (single-threaded,
+/// !Send). Unchanged from before the Windows port — zero behavior change.
+#[cfg(target_os = "linux")]
+#[monoio::main(timer_enabled = true)]
+async fn main() {
+    run_app().await
+}
+
+/// Windows entry point. `monoio` cannot compile on Windows at all
+/// (io_uring is a Linux kernel interface), so there is no `#[monoio::main]`
+/// equivalent available. Per `radio-cat-rs` ADR 0004 §1, this repo's
+/// architecture is a single sequential loop with no concurrent task
+/// (confirmed: no `monoio::spawn` anywhere in this repo), so a minimal
+/// hand-rolled `block_on` is sufficient — no new async-runtime crate
+/// dependency.
+#[cfg(target_os = "windows")]
+fn main() {
+    windows_block_on::block_on(run_app())
+}
+
+/// A minimal, single-threaded, thread-parking `block_on` executor for the
+/// Windows entry point, per ADR 0004 §1's exact specification.
+///
+/// This is intentionally tiny and narrowly scoped: it drives exactly one
+/// top-level future (`run_app()`) to completion on the calling thread, with
+/// no support for spawning additional tasks. That is sufficient here
+/// because `ft991a` never spawns concurrent tasks (unlike `ts570d`, whose
+/// two-task `ui`/`radio` design would need a different, heavier Windows
+/// executor — see ADR 0004 §1's `ts570d` discussion, not applicable here).
+///
+/// # How it works
+///
+/// `block_on` repeatedly polls the future. Every `Future::poll` call is
+/// handed a [`Context`] wrapping a [`Waker`]. If the future returns
+/// `Poll::Pending`, it means some other party (here, a background worker
+/// thread inside `cat-transport-serial`'s Windows `SerialPort`, per ADR
+/// 0004 §1's completion-primitive design) has been given a *clone* of that
+/// `Waker` and has promised to call `.wake()` on it once progress is
+/// possible again. Until then, this thread has nothing productive to do, so
+/// it calls [`std::thread::park`] to yield the CPU. When the future's
+/// waker is invoked from another thread, `wake()` calls
+/// [`std::thread::Thread::unpark`] on *this* thread, which causes the
+/// parked `park()` call to return, and the loop polls again.
+///
+/// `std::thread::park`'s documented contract permits spurious wakeups (a
+/// `park()` call may return without a matching `unpark()`), which is why
+/// this is a loop that always re-polls rather than a one-shot wait: a
+/// spurious wakeup here just causes one extra `poll()` call that returns
+/// `Pending` again, which is harmless, not a correctness bug.
+#[cfg(target_os = "windows")]
+mod windows_block_on {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake};
+    use std::thread::{self, Thread};
+
+    /// A [`Wake`] implementation that unparks the thread which created it.
+    /// This is the classic minimal thread-parking waker pattern: `wake()`
+    /// (and `wake_by_ref()`, via the default trait method that clones
+    /// `Arc<Self>` and calls `wake()`) is safe to call from any thread —
+    /// exactly the guarantee `std::task::Waker` requires — because
+    /// `Thread::unpark()` itself is documented as safe to call from any
+    /// thread, any number of times, at any point in that thread's
+    /// lifetime, including before it parks (in which case the *next*
+    /// `park()` call returns immediately rather than blocking).
+    struct ThreadWaker(Thread);
+
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    /// Block the calling thread until `future` resolves, returning its
+    /// output. Drives exactly one future to completion; does not support
+    /// spawning additional concurrent tasks.
+    pub fn block_on<F: Future>(future: F) -> F::Output {
+        // `pin!` gives us a stack-pinned, `Pin<&mut F>` without requiring
+        // `F: Unpin` or a heap allocation (`Box::pin`) — the future may be
+        // a large, self-referential compiler-generated async-fn state
+        // machine, exactly the shape `run_app()` is.
+        let mut future = pin!(future);
+
+        let waker = Arc::new(ThreadWaker(thread::current())).into();
+        let mut cx = Context::from_waker(&waker);
+
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                // Some pending operation elsewhere (e.g. the Windows serial
+                // worker thread) holds a clone of `waker` and will call
+                // `.wake()` on it once this future can make progress
+                // again. Park until then; spurious wakeups just cause one
+                // harmless extra `poll()` (see module docs).
+                Poll::Pending => thread::park(),
+            }
+        }
+    }
 }

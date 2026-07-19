@@ -1,31 +1,46 @@
 # Yaesu FT-991A Radio Control
 
-Terminal-based CAT control for the Yaesu FT-991A HF/VHF/UHF transceiver. This is
-the **second** radio built on top of a shared, radio-independent CAT
-(Computer Aided Transceiver) engine — the first being
+Terminal-based CAT control for the Yaesu FT-991A HF/VHF/UHF transceiver. The
+**second** radio built on top of [`radio-cat-rs`](https://github.com/kf0uwv/radio-cat-rs),
+a shared, radio-independent CAT engine — the first being
 [`ts570d`](https://github.com/kf0uwv/ts570d) (Kenwood TS-570D/S).
 
-## Status: scaffolding only — no implementation yet
+## Status: full command coverage, Windows-buildable
 
-This repository currently contains **no Rust code**. There is no `Cargo.toml`,
-no crates, and no CAT command implementation. What exists is planning and
-agent scaffolding: ADRs recording the intended architecture, subagent
-definitions adapted from `ts570d`'s working discipline, and per-agent
-planning directories — so that once the shared library is ready,
-implementation can begin immediately with the same conventions `ts570d` uses.
+- **`radio`** — all 91 top-level FT-991A CAT commands and 151 of 153 `EX`
+  menu settings items implemented (the remaining two, "TIME ZONE" and "RADIO
+  ID", have no resolvable wire encoding in the official manual). Every
+  command was independently re-verified against the manual page-by-page, not
+  assumed from Kenwood/TS-570D parity — several real manual inconsistencies
+  were found and resolved along the way (documented in `planning/yaesu/`).
+  Includes RTS/DTR-based real-time CW keying (`EX` menu 060 "PC KEYING") via
+  `radio-cat-rs`'s `ModemControlLines` capability.
+- **`ui`** — a ratatui/crossterm terminal interface, currently a flat
+  single-screen design (built when the command surface was much smaller); a
+  grouped-menu redesign proportional to the full 91-command/151-setting
+  surface is in progress.
+- **`emulator`** — a PTY-hosted FT-991A protocol simulator for testing
+  without real hardware, mirroring `ts570d`'s emulator.
+- **Windows**: `cat-transport-serial` (in `radio-cat-rs`) has a native Win32
+  COM-port backend alongside the Linux io_uring path, and this application's
+  entry point is platform-gated (`#[monoio::main]` on Linux, a hand-rolled
+  thread-parking executor on Windows, since `monoio`/`tokio` don't exist
+  there). Verified via `cargo check --target x86_64-pc-windows-gnu` —
+  real cross-compilation type-checking. Runtime behavior against a physical
+  Windows machine has not been validated in this environment.
 
 See [`docs/adr/0001-second-radio-on-shared-cat-framework.md`](docs/adr/0001-second-radio-on-shared-cat-framework.md)
-for the recorded decision and its current blocked status.
+and [`docs/adr/0002-rts-dtr-ptt-cw-keying.md`](docs/adr/0002-rts-dtr-ptt-cw-keying.md)
+for the design record, and [`docs/adr/README.md`](docs/adr/README.md) for
+current repository status.
 
 ## Why this repo exists
 
-`ts570d` was refactored (see its `docs/adr/0001`–`0005`) to separate a
-generic, radio-independent CAT engine from Kenwood-TS-570D-specific command
-tables, state machines, and domain types, specifically so that a second
-radio could reuse the generic engine "unchanged" — providing only its own
-`CommandId` enum, command table, state machine, `Event`/`Error` types, and a
-`CatRadio` implementation (`ts570d` ADR 0004). This repository is that second
-radio, targeting the Yaesu FT-991A.
+`ts570d` was refactored so a generic, radio-independent CAT engine could be
+extracted into `radio-cat-rs` and reused "unchanged" by a second radio,
+providing only its own `CommandId` enum, command table, state machine,
+domain types, and a `CatRadio` implementation. This repository is that
+second radio, targeting the Yaesu FT-991A.
 
 ## Relationship to sibling repositories
 
@@ -38,60 +53,55 @@ radio-cat-rs   shared library (cat-framework, cat-client, cat-transport-*, cat-s
         (Kenwood TS-570D/S, first radio)   (Yaesu FT-991A, second radio)
 ```
 
-- **`ts570d`** — sibling application, same architecture pattern. It is the
-  template this repo's structure follows: same crate shapes (`radio`, `ui`,
-  `serial`, `emulator`, application wiring), same planning-with-files and
-  subagent discipline, same "framework knows how to process a command, the
-  radio crate knows what a command means" split. It is **not** a dependency
-  of this repo — the shared engine is being extracted from it into
-  `radio-cat-rs` instead, precisely so neither radio depends on the other.
-- **`radio-cat-rs`** — the shared library this repo will depend on once
-  extraction from `ts570d` happens: `cat-framework` (generic command table,
-  parser, dispatch, response builder), `cat-client`/`CatSession`
-  (transport-independent request/response abstraction), and
-  `cat-transport-serial`/`-tcp`/`-udp` (transport implementations). As of
-  this writing, `radio-cat-rs` is itself being scaffolded in parallel and its
-  crates do not yet exist. This repo cannot build against it yet.
+`ts570d` and `ft991a` are independent siblings — neither depends on the
+other. Both depend on `radio-cat-rs` for the generic engine, transport
+traits, and (where applicable) serial/TCP/UDP transport implementations.
 
 ## The FT-991A is not the TS-570D
 
-The FT-991A is a Yaesu radio, not a Kenwood radio. Its CAT command set,
-framing conventions, parameter encodings, and response layouts are Yaesu's
-own and differ from Kenwood's TS-570D command table — different command
-codes, different parameter widths, different response formats. Nothing about
-the TS-570D command table transfers over by assumption. When implementation
-begins, the FT-991A command table must be derived from the official Yaesu
-FT-991A CAT operation reference manual, page by page, the same discipline
-`ts570d`'s `kenwood` agent applied to the Kenwood manual (see
-`.claude/agents/yaesu.md`).
+The FT-991A is a Yaesu radio; its CAT command set, framing conventions,
+parameter encodings, and response layouts are Yaesu's own and differ from
+Kenwood's TS-570D command table throughout — different command codes,
+different parameter widths, different response formats. Nothing in this
+repo's command table was transferred from `ts570d` by assumption; every
+command was derived from the official Yaesu FT-991A CAT operation reference
+manual directly (see `.claude/agents/yaesu.md`).
 
-## What this repo will look like, once unblocked
+## Building
 
-Following `ts570d`'s shape (see its ADR 0004 and `CLAUDE.md`), this repo is
-expected to end up with:
+```sh
+cargo build --workspace           # Linux (native)
+cargo check --target x86_64-pc-windows-gnu -p ft991a   # Windows (cross-compile check)
+```
 
-- `radio/` — `Ft991aCommandId`, a static `FT991A_COMMAND_TABLE`, the
-  `Ft991aRadio` state machine (a `cat_framework::CatRadio` implementation),
-  `Ft991aState`/`Ft991aEvent`/`Ft991aError`, a `Radio` trait plus FT-991A
-  domain types, and a controller client generic over the shared library's
-  session/transport abstraction.
-- `ui/` — a ratatui/crossterm terminal interface, depending on `radio` and
-  the shared library's domain-independent types only.
-- `serial/` — likely a thin consumer of `radio-cat-rs`'s
-  `cat-transport-serial` rather than a from-scratch io_uring implementation;
-  see `.claude/agents/serial.md` for why this is recorded as an open
-  decision rather than settled.
-- `emulator/` — an FT-991A protocol simulator for testing, mirroring
-  `ts570d`'s emulator role.
-- Application wiring (`src/main.rs` equivalent) — the only place concrete
-  types are assembled.
+Running against real hardware:
 
-None of this exists yet. See `docs/adr/` and `CLAUDE.md` for the binding
-rules that will govern this work once it starts, and `.claude/agents/` for
-the subagent roster.
+```sh
+cargo run --bin ft991a -- --port /dev/ttyUSB0 --baud 9600
+```
+
+Running against the emulator (no hardware needed):
+
+```sh
+cargo run -p emulator -- --background   # prints PTY_SLAVE=<path>
+cargo run --bin ft991a -- --port <path> --baud 9600
+```
+
+## Layout
+
+- `radio/` — `Ft991aCommandId`, `FT991A_COMMAND_TABLE`, `Ft991aRadio` (a
+  `cat_framework::CatRadio` implementation), `Ft991aState`/`Ft991aEvent`,
+  the `Radio`/`Ft991aExtras`/`CwKeying` traits plus FT-991A domain types, and
+  `Ft991a<S: CatSession>`, the typed controller client.
+- `ui/` — ratatui/crossterm terminal interface, depends on `radio` only.
+- `emulator/` — PTY-hosted FT-991A simulator + optional TUI for observing
+  simulated CAT traffic.
+- `src/main.rs` — application wiring: the only place a concrete transport
+  type is named.
+
+No local `serial` crate — serial transport is consumed directly from
+`radio-cat-rs`'s `cat-transport-serial`.
 
 ## License
 
-Intended to be licensed under the Apache License, Version 2.0, matching the
-sibling `ts570d` project. A `LICENSE.txt` will be added alongside the first
-real implementation commit.
+Apache License, Version 2.0, matching the sibling `ts570d` project.

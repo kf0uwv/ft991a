@@ -4,25 +4,35 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Placeholder terminal interface for FT-991A (Wave 1 stub — real ratatui TUI lands in Wave 2)"
+description = "Ratatui terminal interface for FT-991A"
 rust-version.workspace = true
 
 [dependencies]
-# FT-991A `Radio` trait + domain types — the only thing this crate depends
-# on, per CLAUDE.md's dependency model (`ui` never imports a transport
-# crate directly).
+# FT-991A `Radio` trait + domain types — the only radio-facing thing this
+# crate depends on, per CLAUDE.md's dependency model (`ui` never imports a
+# transport crate directly).
 radio = { path = "../radio" }
-
-# Async runtime
-monoio = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
 
+# Terminal UI
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+
 [dev-dependencies]
-# Only used by the in-crate MockRadio test fixture, to implement the
+# Only used by the in-crate MockRadio test fixtures, to implement the
 # `#[async_trait(?Send)]`-defined `radio::Radio` trait.
 async-trait = { workspace = true }
+
+# Async runtime (io_uring-based, Linux-only — monoio cannot compile on
+# Windows at all). Target-gated per
+# docs/adr/0004-windows-serial-backend.md (radio-cat-rs); mirrors the same
+# gating applied to the root Cargo.toml and to cat-transport-serial's own
+# Cargo.toml. `terminal.rs`'s idle-sleep call and its `#[monoio::test]`
+# unit tests are the only consumers on this crate's Linux build.
+[target.'cfg(target_os = "linux")'.dependencies]
+monoio = { workspace = true }
 
 [features]
 default = []
