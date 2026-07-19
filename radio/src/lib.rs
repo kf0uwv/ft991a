@@ -132,7 +132,7 @@ pub use ft991a_radio::{
     SH_BANDWIDTH_TABLE,
 };
 pub use radio_trait::{
-    AgcMode, Band, Frequency, MemoryChannelEntry, MemoryTag, Meter, Mode, NopRadio, PreampMode,
-    Radio, RadioError, RadioIndicator, RadioResult, RepeaterShift, ScanState, TaggedMemoryChannel,
-    ToneSquelchMode, TxState,
+    AgcMode, Band, CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Meter, Mode,
+    NopRadio, PreampMode, Radio, RadioError, RadioIndicator, RadioResult, RepeaterShift, ScanState,
+    TaggedMemoryChannel, ToneSquelchMode, TxState,
 };

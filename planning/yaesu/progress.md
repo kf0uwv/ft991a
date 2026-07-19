@@ -1271,3 +1271,85 @@ not skips; see above).
 (151 of 153 possible rows; 027 and 087 are permanently unresolvable from
 this manual alone, not deferred). Any future work on those two items
 would require either hardware access or a different source document.
+
+## Wave 4 — Task 1: `Ft991aExtras`/`CwKeying` traits + `EX` label extension (2026-07-19)
+
+Status: **implementation complete, verification clean, ready for architect
+review.** Per `planning/architect/task_plan.md` §11.3 point 3-4, §11.4
+first two paragraphs, and §11.6 dispatch item 1 — the Wave 4 `radio`-crate
+prerequisite everything else (grouped-menu `ui` redesign, `EX` escape
+hatch, RTS CW-keying keybinding) depends on.
+
+Delivered, `radio/` crate only:
+- `radio/src/radio_trait.rs`: `Ft991aExtras` trait (50 async methods,
+  `#[async_trait(?Send)]`, all default bodies `Err(RadioError::
+  NotImplemented)`, identical idiom to `Radio`); `CwKeying` trait (5 sync
+  `&self` methods, same default-body idiom); `RadioError::
+  UnknownExMenuItem(u16)` new variant; `impl Ft991aExtras for NopRadio {}`
+  / `impl CwKeying for NopRadio {}`.
+- `radio/src/ft991a.rs`: `impl<S: CatSession<Error = TransportError>>
+  Ft991aExtras for Ft991a<S>` (48 one-line forwards to existing inherent
+  methods + 2 new inherent methods, `get_ex_menu_item`/
+  `set_ex_menu_item`); `impl<S: CatSession<Error = TransportError> +
+  ModemControlLines> CwKeying for Ft991a<S>` (5 one-line forwards to the
+  already-landed Wave-3 `assert_rts`/etc. inherent methods).
+- `radio/src/ft991a_radio.rs`: `ExMenuValueKind::Enumerated` widened from
+  `&'static [&'static str]` to `&'static [(&'static str, &'static str)]`
+  (wire, label) — all 79 `Enumerated` `EX_MENU_TABLE` rows updated with
+  labels sourced from this file's own existing doc-comment legend tables
+  (zero mismatches, zero freshly-guessed labels). `ExMenuValueKind::
+  parse`/`format` widened private → `pub(crate)`; new `label_for_value`
+  convenience method. `ex_menu_item` re-exported for use from `ft991a.rs`.
+- `radio/src/lib.rs`: `Ft991aExtras`/`CwKeying` added to the crate-root
+  re-export list (needed for `ft991a.rs`'s `impl<S> crate::Ft991aExtras
+  for ...` to resolve).
+
+Verification (all from repo root):
+- `cargo build -p radio` — clean, confirming **zero coherence conflicts**
+  between the two new impl blocks (the actual point of this design,
+  verified by compiling, not just trusted from the architect's plan).
+- `cargo test -p radio` — **517 unit tests + 1 doctest, all passing** (was
+  501+1; 16 new tests — 3 trait-bound compilation-sanity tests
+  [`Ft991aExtras` × 2, `CwKeying` × 1, all dispatched through generic
+  trait bounds, not inherent-method calls, to genuinely prove the impls
+  are reachable the way a future `ui::run<R: Radio + Ft991aExtras +
+  CwKeying>` would use them], 7 `get`/`set_ex_menu_item` tests
+  [`Enumerated` round-trip, `Range` round-trip, unknown-P1 errors ×2,
+  illegal-value-rejection ×1 covering both `Enumerated` and `Range`], 6
+  `Enumerated`-label spot-check tests [items 060, 006, 072, 116, 031/029,
+  plus one full-table non-empty-label sweep] — zero regressions, all 501
+  prior tests pass completely unmodified).
+- `cargo clippy -p radio --all-targets -- -D warnings` — clean, no fixes
+  needed.
+- `cargo fmt --check -p radio` — clean after one `cargo fmt -p radio`
+  pass (line-wrapping of newly-long `Enumerated` tuple array literals and
+  one over-long forwarding method signature, no logic changes).
+- Confirmed via `git status`/`git diff --stat` that only `radio/src/
+  {ft991a.rs, ft991a_radio.rs, lib.rs, radio_trait.rs}` were modified by
+  this task (1188 insertions, 99 deletions) — `ui/`, `emulator/`,
+  `src/main.rs`, root `Cargo.toml`, `ts570d/`, `radio-cat-rs/` untouched.
+  (Note: `emulator/src/tui.rs` and `planning/emulator/*` also showed as
+  modified in `git status`, but that is a different, concurrently-running
+  agent's work per the architect's parallel-dispatch design §11.6 item
+  10 — not touched by this task, confirmed by this session's own tool-call
+  history never opening those files.)
+
+Judgment calls / flagged items (see findings.md for full detail, none
+blocked the task):
+- Architect's "~20" inherent-method estimate corrected to 48, verified
+  directly rather than trusted (see findings.md).
+- `RadioError::UnknownExMenuItem(u16)` added since nothing existing fit.
+- `ExMenuValueKind::parse`/`format` widened to `pub(crate)` (minimal
+  necessary visibility change to reuse server-side logic client-side, per
+  the task's explicit instruction).
+- `label_for_value` convenience method added, not yet consumed anywhere
+  in this crate (forward-looking for a future `ui` `ListSelect`
+  consumer, §11.4) — flagged as a nice-to-have, not required by this
+  task's own deliverables.
+- `impl Ft991aExtras for NopRadio {}` / `impl CwKeying for NopRadio {}`
+  added proactively (cheap, keeps `NopRadio` usable against the widened
+  future `ui::run` bound) — not explicitly required by this task.
+
+No ambiguity blocked this task. Not touched (per task constraints): `ui/`,
+`emulator/`, `src/main.rs`, root `Cargo.toml`, `ts570d/`, `radio-cat-rs/`.
+No commits made.

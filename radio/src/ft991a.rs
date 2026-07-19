@@ -245,8 +245,8 @@ use cat_transport_core::{CatSession, ModemControlLines, ResponseDisposition, Tra
 
 use crate::ft991a_radio::{
     apf_hz_to_raw, apf_raw_to_hz, ctcss_tone_hz, ctcss_tone_index, dcs_code_index, dcs_code_number,
-    ky_selector_to_wire, ChannelStatusFields, EncoderSelector, Ft991aCommandId, KeyerPlaybackMode,
-    FT991A_COMMAND_TABLE,
+    ex_menu_item, ky_selector_to_wire, ChannelStatusFields, EncoderSelector, Ft991aCommandId,
+    KeyerPlaybackMode, FT991A_COMMAND_TABLE,
 };
 use crate::{
     AgcMode, Band, Frequency, MemoryChannelEntry, MemoryTag, Meter, Mode, PreampMode, RadioError,
@@ -2495,12 +2495,242 @@ where
         self.client.set("PB", "00").await.map_err(Into::into)
     }
 
+    // -----------------------------------------------------------------------
+    // EX menu escape hatch (get/set by P1) — planning/architect/task_plan.md
+    // §11.4
+    // -----------------------------------------------------------------------
+
+    /// Read an `EX` menu item's raw integer value by its `P1` menu number
+    /// (manual p.7-9; `EX<P1>;` -> `EX<P1><P2>;`). Reuses the exact same
+    /// `EX_MENU_TABLE` lookup and `ExMenuValueKind::parse` logic
+    /// `Ft991aRadio::handle_command`'s `Ex` arm already uses server-side,
+    /// from the client side, rather than reimplementing menu lookup.
+    /// Returns [`RadioError::UnknownExMenuItem`] if `p1` isn't a landed
+    /// `EX_MENU_TABLE` row.
+    pub async fn get_ex_menu_item(&mut self, p1: u16) -> RadioResult<i32> {
+        let item = ex_menu_item(p1).ok_or(RadioError::UnknownExMenuItem(p1))?;
+        let p1_str = format!("{p1:03}");
+        let raw = self.client.query_with_param("EX", &p1_str).await?;
+        let body = parse_frame(&raw, "EX")?;
+        let p2 = body
+            .strip_prefix(p1_str.as_str())
+            .ok_or_else(|| RadioError::InvalidProtocolString(raw.clone()))?;
+        if p2.len() != item.digits {
+            return Err(RadioError::InvalidProtocolString(raw.clone()));
+        }
+        item.kind
+            .parse(p2)
+            .ok_or_else(|| RadioError::InvalidProtocolString(raw.clone()))
+    }
+
+    /// Write an `EX` menu item's raw integer value by its `P1` menu
+    /// number. Validates `value` against that item's own
+    /// `ExMenuValueKind` (via the same `format`/`parse` round-trip
+    /// `handle_command`'s `Ex` arm uses server-side) *before* sending, so
+    /// an illegal value is reported as [`RadioError::InvalidProtocolString`]
+    /// attributable to this call rather than as a generic protocol error
+    /// from a rejected wire frame. Returns
+    /// [`RadioError::UnknownExMenuItem`] if `p1` isn't a landed
+    /// `EX_MENU_TABLE` row.
+    pub async fn set_ex_menu_item(&mut self, p1: u16, value: i32) -> RadioResult<()> {
+        let item = ex_menu_item(p1).ok_or(RadioError::UnknownExMenuItem(p1))?;
+        let wire_p2 = item.kind.format(value, item.digits);
+        if item.kind.parse(&wire_p2) != Some(value) {
+            return Err(RadioError::InvalidProtocolString(format!(
+                "EX{p1:03}{wire_p2}"
+            )));
+        }
+        self.client
+            .set("EX", &format!("{p1:03}{wire_p2}"))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Flush the session's receive buffer, discarding unsolicited or stale
     /// data.
     pub fn flush_rx(&mut self) {
         let mut session = self.session.take();
         session.flush_rx();
         self.session.put_back(session);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ft991aExtras trait implementation
+// ---------------------------------------------------------------------------
+
+/// `planning/architect/task_plan.md` §11.3 point 3: implemented
+/// **unconditionally** for the exact same bound the main `impl<S:
+/// CatSession<Error = TransportError>> Ft991a<S>` block above uses — a
+/// single, non-overlapping impl with zero coherence risk. Every method
+/// other than `get_ex_menu_item`/`set_ex_menu_item` (§11.4) simply forwards
+/// to the already-landed inherent method of the same name, above.
+#[async_trait::async_trait(?Send)]
+impl<S> crate::Ft991aExtras for Ft991a<S>
+where
+    S: CatSession<Error = TransportError>,
+{
+    async fn get_information(&mut self) -> RadioResult<ChannelStatusFields> {
+        Ft991a::get_information(self).await
+    }
+    async fn get_opposite_band_information(&mut self) -> RadioResult<ChannelStatusFields> {
+        Ft991a::get_opposite_band_information(self).await
+    }
+
+    async fn get_active_meter_reading(&mut self) -> RadioResult<u8> {
+        Ft991a::get_active_meter_reading(self).await
+    }
+    async fn get_radio_indicator(&mut self, indicator: RadioIndicator) -> RadioResult<bool> {
+        Ft991a::get_radio_indicator(self, indicator).await
+    }
+    async fn get_menu_mode_active(&mut self) -> RadioResult<bool> {
+        Ft991a::get_menu_mode_active(self).await
+    }
+    async fn get_pll_unlocked(&mut self) -> RadioResult<bool> {
+        Ft991a::get_pll_unlocked(self).await
+    }
+
+    async fn toggle_vfo_memory_mode(&mut self) -> RadioResult<()> {
+        Ft991a::toggle_vfo_memory_mode(self).await
+    }
+    async fn qmb_store(&mut self) -> RadioResult<()> {
+        Ft991a::qmb_store(self).await
+    }
+    async fn qmb_recall(&mut self) -> RadioResult<()> {
+        Ft991a::qmb_recall(self).await
+    }
+    async fn quick_split(&mut self) -> RadioResult<()> {
+        Ft991a::quick_split(self).await
+    }
+
+    async fn read_keyer_memory(&mut self, channel: u8) -> RadioResult<String> {
+        Ft991a::read_keyer_memory(self, channel).await
+    }
+    async fn write_keyer_memory(&mut self, channel: u8, message: &str) -> RadioResult<()> {
+        Ft991a::write_keyer_memory(self, channel, message).await
+    }
+    async fn play_keyer_memory(&mut self, channel: u8, mode: KeyerPlaybackMode) -> RadioResult<()> {
+        Ft991a::play_keyer_memory(self, channel, mode).await
+    }
+
+    async fn get_contour_on(&mut self) -> RadioResult<bool> {
+        Ft991a::get_contour_on(self).await
+    }
+    async fn set_contour_on(&mut self, on: bool) -> RadioResult<()> {
+        Ft991a::set_contour_on(self, on).await
+    }
+    async fn get_contour_frequency_hz(&mut self) -> RadioResult<u16> {
+        Ft991a::get_contour_frequency_hz(self).await
+    }
+    async fn set_contour_frequency_hz(&mut self, hz: u16) -> RadioResult<()> {
+        Ft991a::set_contour_frequency_hz(self, hz).await
+    }
+    async fn get_apf_on(&mut self) -> RadioResult<bool> {
+        Ft991a::get_apf_on(self).await
+    }
+    async fn set_apf_on(&mut self, on: bool) -> RadioResult<()> {
+        Ft991a::set_apf_on(self, on).await
+    }
+    async fn get_apf_frequency_hz(&mut self) -> RadioResult<i16> {
+        Ft991a::get_apf_frequency_hz(self).await
+    }
+    async fn set_apf_frequency_hz(&mut self, hz: i16) -> RadioResult<()> {
+        Ft991a::set_apf_frequency_hz(self, hz).await
+    }
+    async fn get_manual_notch_on(&mut self) -> RadioResult<bool> {
+        Ft991a::get_manual_notch_on(self).await
+    }
+    async fn set_manual_notch_on(&mut self, on: bool) -> RadioResult<()> {
+        Ft991a::set_manual_notch_on(self, on).await
+    }
+    async fn get_manual_notch_frequency_hz(&mut self) -> RadioResult<u16> {
+        Ft991a::get_manual_notch_frequency_hz(self).await
+    }
+    async fn set_manual_notch_frequency_hz(&mut self, hz: u16) -> RadioResult<()> {
+        Ft991a::set_manual_notch_frequency_hz(self, hz).await
+    }
+
+    async fn get_parametric_mic_eq_on(&mut self) -> RadioResult<bool> {
+        Ft991a::get_parametric_mic_eq_on(self).await
+    }
+    async fn set_parametric_mic_eq_on(&mut self, on: bool) -> RadioResult<()> {
+        Ft991a::set_parametric_mic_eq_on(self, on).await
+    }
+
+    async fn encoder_down(&mut self, encoder: EncoderSelector, steps: u8) -> RadioResult<()> {
+        Ft991a::encoder_down(self, encoder, steps).await
+    }
+    async fn encoder_up(&mut self, encoder: EncoderSelector, steps: u8) -> RadioResult<()> {
+        Ft991a::encoder_up(self, encoder, steps).await
+    }
+    async fn ent_key(&mut self) -> RadioResult<()> {
+        Ft991a::ent_key(self).await
+    }
+
+    async fn get_antenna_tuner_state(&mut self) -> RadioResult<u8> {
+        Ft991a::get_antenna_tuner_state(self).await
+    }
+    async fn set_antenna_tuner_state(&mut self, state: u8) -> RadioResult<()> {
+        Ft991a::set_antenna_tuner_state(self, state).await
+    }
+
+    async fn get_dimmer(&mut self) -> RadioResult<(u8, u8)> {
+        Ft991a::get_dimmer(self).await
+    }
+    async fn set_dimmer(&mut self, led: u8, tft: u8) -> RadioResult<()> {
+        Ft991a::set_dimmer(self, led, tft).await
+    }
+
+    async fn read_date(&mut self) -> RadioResult<(u16, u8, u8)> {
+        Ft991a::read_date(self).await
+    }
+    async fn write_date(&mut self, year: u16, month: u8, day: u8) -> RadioResult<()> {
+        Ft991a::write_date(self, year, month, day).await
+    }
+    async fn read_time(&mut self) -> RadioResult<(u8, u8, u8)> {
+        Ft991a::read_time(self).await
+    }
+    async fn write_time(&mut self, hour: u8, minute: u8, second: u8) -> RadioResult<()> {
+        Ft991a::write_time(self, hour, minute, second).await
+    }
+    async fn read_time_zone_offset(&mut self) -> RadioResult<i16> {
+        Ft991a::read_time_zone_offset(self).await
+    }
+    async fn write_time_zone_offset(&mut self, minutes: i16) -> RadioResult<()> {
+        Ft991a::write_time_zone_offset(self, minutes).await
+    }
+
+    async fn get_txw_on(&mut self) -> RadioResult<bool> {
+        Ft991a::get_txw_on(self).await
+    }
+    async fn set_txw_on(&mut self, on: bool) -> RadioResult<()> {
+        Ft991a::set_txw_on(self, on).await
+    }
+
+    async fn get_dvs_recording_channel(&mut self) -> RadioResult<Option<u8>> {
+        Ft991a::get_dvs_recording_channel(self).await
+    }
+    async fn start_dvs_recording(&mut self, channel: u8) -> RadioResult<()> {
+        Ft991a::start_dvs_recording(self, channel).await
+    }
+    async fn stop_dvs_recording(&mut self) -> RadioResult<()> {
+        Ft991a::stop_dvs_recording(self).await
+    }
+    async fn get_dvs_playback_channel(&mut self) -> RadioResult<Option<u8>> {
+        Ft991a::get_dvs_playback_channel(self).await
+    }
+    async fn start_dvs_playback(&mut self, channel: u8) -> RadioResult<()> {
+        Ft991a::start_dvs_playback(self, channel).await
+    }
+    async fn stop_dvs_playback(&mut self) -> RadioResult<()> {
+        Ft991a::stop_dvs_playback(self).await
+    }
+
+    async fn get_ex_menu_item(&mut self, p1: u16) -> RadioResult<i32> {
+        Ft991a::get_ex_menu_item(self, p1).await
+    }
+    async fn set_ex_menu_item(&mut self, p1: u16, value: i32) -> RadioResult<()> {
+        Ft991a::set_ex_menu_item(self, p1, value).await
     }
 }
 
@@ -2583,6 +2813,38 @@ where
     /// future transports.
     pub fn read_dcd(&self) -> RadioResult<bool> {
         self.session.read_dcd().map_err(Into::into)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CwKeying trait implementation
+// ---------------------------------------------------------------------------
+
+/// Thin forwarding wrapper over the inherent
+/// `assert_rts`/`assert_dtr`/`read_cts`/`read_dsr`/`read_dcd` methods
+/// above — not new radio-side logic. Bounded on the *same* `S:
+/// CatSession<Error = TransportError> + ModemControlLines` the inherent
+/// impl block above uses (`planning/architect/task_plan.md` §11.3 point
+/// 3) — this is the one trait in this pair that stays genuinely
+/// conditional on the transport, by design.
+impl<S> crate::CwKeying for Ft991a<S>
+where
+    S: CatSession<Error = TransportError> + ModemControlLines,
+{
+    fn assert_rts(&self, asserted: bool) -> RadioResult<()> {
+        Ft991a::assert_rts(self, asserted)
+    }
+    fn assert_dtr(&self, asserted: bool) -> RadioResult<()> {
+        Ft991a::assert_dtr(self, asserted)
+    }
+    fn read_cts(&self) -> RadioResult<bool> {
+        Ft991a::read_cts(self)
+    }
+    fn read_dsr(&self) -> RadioResult<bool> {
+        Ft991a::read_dsr(self)
+    }
+    fn read_dcd(&self) -> RadioResult<bool> {
+        Ft991a::read_dcd(self)
     }
 }
 
@@ -5296,5 +5558,270 @@ mod tests {
         assert!(radio.read_cts().unwrap());
         assert!(!radio.read_dsr().unwrap());
         assert!(radio.read_dcd().unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ft991aExtras / CwKeying trait-bound compilation sanity
+    // (planning/architect/task_plan.md §11.3-11.4)
+    //
+    // These call through the *trait* (generic `R: Ft991aExtras`/`R:
+    // CwKeying` bounds), not the inherent methods directly — proving the
+    // `impl<S: CatSession<Error = TransportError>> Ft991aExtras for
+    // Ft991a<S>` / `impl<S: ... + ModemControlLines> CwKeying for
+    // Ft991a<S>` blocks genuinely exist, compile, and are reachable
+    // generically (the actual point of this design — a generic
+    // `ui::run<R: Radio + Ft991aExtras + CwKeying>` needs exactly this).
+    // -----------------------------------------------------------------------
+
+    async fn call_get_active_meter_reading<R: crate::Ft991aExtras>(r: &mut R) -> RadioResult<u8> {
+        r.get_active_meter_reading().await
+    }
+
+    async fn call_get_dimmer<R: crate::Ft991aExtras>(r: &mut R) -> RadioResult<(u8, u8)> {
+        r.get_dimmer().await
+    }
+
+    fn call_assert_rts<R: crate::CwKeying>(r: &R, asserted: bool) -> RadioResult<()> {
+        r.assert_rts(asserted)
+    }
+
+    fn call_read_cts<R: crate::CwKeying>(r: &R) -> RadioResult<bool> {
+        r.read_cts()
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_ft991a_extras_trait_is_implemented_and_callable_generically() {
+        let mut radio = make_radio("RM0100;");
+        let value = call_get_active_meter_reading(&mut radio).await.unwrap();
+        assert_eq!(value, 100);
+        assert_eq!(radio.session.borrow().transport.written(), b"RM0;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_ft991a_extras_trait_second_method_also_compiles_and_works() {
+        let mut radio = make_radio("DA000208;");
+        let (led, tft) = call_get_dimmer(&mut radio).await.unwrap();
+        assert_eq!((led, tft), (2, 8));
+    }
+
+    #[test]
+    fn test_cw_keying_trait_is_implemented_and_callable_generically() {
+        let transport = FakeTransport::new();
+        let radio = Ft991a::new(SerialCatSession::new(transport));
+        call_assert_rts(&radio, true).unwrap();
+        assert_eq!(
+            radio.session.borrow().transport.last_set_rts.get(),
+            Some(true)
+        );
+        radio.session.borrow().transport.cts.set(true);
+        assert!(call_read_cts(&radio).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // get_ex_menu_item / set_ex_menu_item (planning/architect/task_plan.md
+    // §11.4)
+    // -----------------------------------------------------------------------
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_ex_menu_item_enumerated_round_trip() {
+        // Item 060 "PC KEYING": Enumerated, digits=1, 0=OFF/1=DAKY/2=RTS/3=DTR.
+        let mut radio = make_radio("EX0602;");
+        let value = radio.get_ex_menu_item(60).await.unwrap();
+        assert_eq!(value, 2);
+        assert_eq!(radio.session.borrow().transport.written(), b"EX060;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_ex_menu_item_enumerated_round_trip() {
+        // Item 060 "PC KEYING", set to 2 (RTS).
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        radio.set_ex_menu_item(60, 2).await.unwrap();
+        assert_eq!(radio.session.borrow().transport.written_str(), "EX0602;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_ex_menu_item_range_round_trip() {
+        // Item 001 "AGC FAST DELAY": Range 20..=4000 step 20, digits=4.
+        let mut radio = make_radio("EX0010100;");
+        let value = radio.get_ex_menu_item(1).await.unwrap();
+        assert_eq!(value, 100);
+        assert_eq!(radio.session.borrow().transport.written(), b"EX001;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_ex_menu_item_range_round_trip() {
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        radio.set_ex_menu_item(1, 100).await.unwrap();
+        assert_eq!(radio.session.borrow().transport.written_str(), "EX0010100;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_ex_menu_item_unknown_p1_fails_without_touching_wire() {
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        assert!(matches!(
+            radio.get_ex_menu_item(999).await.unwrap_err(),
+            RadioError::UnknownExMenuItem(999)
+        ));
+        assert_eq!(radio.session.borrow().transport.written(), b"");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_ex_menu_item_unknown_p1_fails_without_touching_wire() {
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        assert!(matches!(
+            radio.set_ex_menu_item(999, 0).await.unwrap_err(),
+            RadioError::UnknownExMenuItem(999)
+        ));
+        assert_eq!(radio.session.borrow().transport.written(), b"");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_ex_menu_item_rejects_illegal_value_without_touching_wire() {
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        // Item 060 "PC KEYING" only has legal wire values 0-3.
+        assert!(matches!(
+            radio.set_ex_menu_item(60, 9).await.unwrap_err(),
+            RadioError::InvalidProtocolString(_)
+        ));
+        assert_eq!(radio.session.borrow().transport.written(), b"");
+
+        // Item 001 "AGC FAST DELAY" is 20..=4000 in steps of 20 — 21 is
+        // off-step, 5000 is out of range.
+        assert!(matches!(
+            radio.set_ex_menu_item(1, 21).await.unwrap_err(),
+            RadioError::InvalidProtocolString(_)
+        ));
+        assert!(matches!(
+            radio.set_ex_menu_item(1, 5000).await.unwrap_err(),
+            RadioError::InvalidProtocolString(_)
+        ));
+        assert_eq!(radio.session.borrow().transport.written(), b"");
+    }
+
+    // -----------------------------------------------------------------------
+    // Enumerated label spot-checks against this file's own doc-comment
+    // transcriptions (ft991a_radio.rs's EX_MENU_TABLE doc comment)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ex_menu_enumerated_labels_spot_check_060_pc_keying() {
+        let item = crate::ft991a_radio::ex_menu_item(60).unwrap();
+        match item.kind {
+            crate::ft991a_radio::ExMenuValueKind::Enumerated(values) => {
+                assert_eq!(
+                    values,
+                    &[("0", "OFF"), ("1", "DAKY"), ("2", "RTS"), ("3", "DTR")]
+                );
+            }
+            _ => panic!("item 060 should be Enumerated"),
+        }
+    }
+
+    #[test]
+    fn test_ex_menu_enumerated_labels_spot_check_006_display_color() {
+        let item = crate::ft991a_radio::ex_menu_item(6).unwrap();
+        match item.kind {
+            crate::ft991a_radio::ExMenuValueKind::Enumerated(values) => {
+                assert_eq!(
+                    values,
+                    &[
+                        ("0", "BLUE"),
+                        ("1", "GRAY"),
+                        ("2", "GREEN"),
+                        ("3", "ORANGE"),
+                        ("4", "PURPLE"),
+                        ("5", "RED"),
+                        ("6", "SKY BLUE"),
+                    ]
+                );
+            }
+            _ => panic!("item 006 should be Enumerated"),
+        }
+    }
+
+    #[test]
+    fn test_ex_menu_enumerated_labels_spot_check_072_data_port_select_starts_at_one() {
+        // Item 072 is one of the two documented DATA/USB inconsistency
+        // items that start at "1", not "0" — see EX_MENU_TABLE's doc
+        // comment "Genuine manual inconsistency" section.
+        let item = crate::ft991a_radio::ex_menu_item(72).unwrap();
+        match item.kind {
+            crate::ft991a_radio::ExMenuValueKind::Enumerated(values) => {
+                assert_eq!(values, &[("1", "DATA"), ("2", "USB")]);
+            }
+            _ => panic!("item 072 should be Enumerated"),
+        }
+    }
+
+    #[test]
+    fn test_ex_menu_enumerated_labels_spot_check_116_scp_span_freq_gap() {
+        // Item 116 has a documented gap at 00-02 (legal values 03-07 only).
+        let item = crate::ft991a_radio::ex_menu_item(116).unwrap();
+        match item.kind {
+            crate::ft991a_radio::ExMenuValueKind::Enumerated(values) => {
+                assert_eq!(
+                    values,
+                    &[
+                        ("03", "50kHz"),
+                        ("04", "100kHz"),
+                        ("05", "200kHz"),
+                        ("06", "500kHz"),
+                        ("07", "1000kHz"),
+                    ]
+                );
+            }
+            _ => panic!("item 116 should be Enumerated"),
+        }
+    }
+
+    #[test]
+    fn test_ex_menu_enumerated_labels_spot_check_031_cat_rate_same_shape_as_029() {
+        // Item 031 "CAT RATE" is documented as "same shape as 029"
+        // (232C RATE) in EX_MENU_TABLE's doc comment.
+        let item_29 = crate::ft991a_radio::ex_menu_item(29).unwrap();
+        let item_31 = crate::ft991a_radio::ex_menu_item(31).unwrap();
+        match (item_29.kind, item_31.kind) {
+            (
+                crate::ft991a_radio::ExMenuValueKind::Enumerated(v29),
+                crate::ft991a_radio::ExMenuValueKind::Enumerated(v31),
+            ) => {
+                assert_eq!(v29, v31);
+                assert_eq!(
+                    v31,
+                    &[
+                        ("0", "4800bps"),
+                        ("1", "9600bps"),
+                        ("2", "19200bps"),
+                        ("3", "38400bps"),
+                    ]
+                );
+            }
+            _ => panic!("items 029/031 should both be Enumerated"),
+        }
+    }
+
+    #[test]
+    fn test_ex_menu_all_enumerated_items_have_no_empty_labels() {
+        // Broad sanity sweep: every Enumerated item's every label is
+        // non-empty (catches an accidental blank/placeholder label across
+        // all 79 Enumerated rows, not just the spot-checked ones above).
+        for item in crate::ft991a_radio::EX_MENU_TABLE {
+            if let crate::ft991a_radio::ExMenuValueKind::Enumerated(values) = item.kind {
+                for (wire, label) in values {
+                    assert!(
+                        !wire.is_empty() && !label.is_empty(),
+                        "item {} ({}) has an empty wire/label pair: {:?}",
+                        item.p1,
+                        item.name,
+                        (wire, label)
+                    );
+                }
+            }
+        }
     }
 }

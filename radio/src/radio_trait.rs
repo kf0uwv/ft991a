@@ -43,6 +43,8 @@ use cat_client::ClientError;
 use cat_transport_core::TransportError;
 use thiserror::Error;
 
+use crate::ft991a_radio::{ChannelStatusFields, EncoderSelector, KeyerPlaybackMode};
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
@@ -124,6 +126,8 @@ pub enum RadioError {
     InvalidTxVfo(u8),
     #[error("Invalid DVS channel: {0} (valid: 1-5)")]
     InvalidDvsChannel(u8),
+    #[error("Unknown EX menu item: P1={0:03} (not in EX_MENU_TABLE)")]
+    UnknownExMenuItem(u16),
     #[error("Frequency out of range: {0} Hz (valid: {min}-{max})", min = Frequency::MIN_HZ, max = Frequency::MAX_HZ)]
     FrequencyOutOfRange(u64),
     #[error("Invalid protocol string: {0}")]
@@ -1802,6 +1806,400 @@ pub trait Radio {
 }
 
 // ---------------------------------------------------------------------------
+// Ft991aExtras trait
+// ---------------------------------------------------------------------------
+
+/// FT-991A-specific capabilities that stayed `Ft991a`-inherent-only through
+/// Waves 1-3 (per `CLAUDE.md`'s "Radio trait scope" — keyer memory
+/// playback, QMB, encoder nudges, antenna tuner, dimmer, date/time, DVS,
+/// contour/APF/manual notch, the `IF`/`OI` composite status payloads, and
+/// the `EX` menu escape hatch), re-exposed here as trait methods so a
+/// generic `ui::run<R: Radio + Ft991aExtras + ...>` can still reach them —
+/// see `planning/architect/task_plan.md` §11.3 point 3.
+///
+/// Every method below (other than [`Self::get_ex_menu_item`]/
+/// [`Self::set_ex_menu_item`], which are genuinely new — see §11.4) already
+/// exists as an inherent method on [`crate::Ft991a`] (Waves 1-3): this
+/// trait is a **re-export surface**, not new functionality. Default bodies
+/// return [`RadioError::NotImplemented`], exactly [`Radio`]'s own idiom;
+/// [`crate::Ft991a`]'s impl (in `ft991a.rs`) simply forwards each method to
+/// its own already-landed inherent method of the same name.
+///
+/// Implemented **unconditionally** for `impl<S: CatSession<Error =
+/// TransportError>> Ft991aExtras for Ft991a<S>` — the exact same bound
+/// [`Radio`]'s own impl uses. This is a single, non-overlapping impl with
+/// zero coherence risk: unlike [`CwKeying`] (which genuinely needs the
+/// extra `S: ModemControlLines` bound and so gets its own, separate impl
+/// block), every method here can be implemented against a plain
+/// `S: CatSession` alone, so there is no second, overlapping
+/// `Ft991aExtras for Ft991a<S>` impl to collide with this one — confirmed
+/// by this crate's own `cargo build` (see `planning/yaesu/findings.md`),
+/// not just asserted.
+///
+/// Uses `#[async_trait(?Send)]`, matching [`Radio`] — compatible with
+/// monoio's thread-per-core (`!Send`) futures.
+#[async_trait(?Send)]
+pub trait Ft991aExtras {
+    // -----------------------------------------------------------------------
+    // Composite status payloads (IF, OI)
+    // -----------------------------------------------------------------------
+
+    /// Query the composite VFO/memory-channel status payload (`IF`, manual
+    /// p.10).
+    async fn get_information(&mut self) -> RadioResult<ChannelStatusFields> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query the composite opposite-band (VFO-B) status payload (`OI`,
+    /// manual p.13; read-only).
+    async fn get_opposite_band_information(&mut self) -> RadioResult<ChannelStatusFields> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Meters/status (RM direct reading, RI, RS, UL)
+    // -----------------------------------------------------------------------
+
+    /// Read whatever meter is currently shown on the front panel (`RM`
+    /// `P1=0`, manual p.15).
+    async fn get_active_meter_reading(&mut self) -> RadioResult<u8> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query one status-flag indicator (`RI`, manual p.15).
+    async fn get_radio_indicator(&mut self, _indicator: RadioIndicator) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query whether the radio is currently in MENU MODE (`RS`, manual
+    /// p.16).
+    async fn get_menu_mode_active(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query whether the PLL is unlocked (`UL`, manual p.18).
+    async fn get_pll_unlocked(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // VFO/memory quick-ops with no generic-`Radio` home (VM, QI, QR, QS)
+    // -----------------------------------------------------------------------
+
+    /// Emulate pressing the front-panel `[V/M]` key (`VM`, manual p.18).
+    /// **Judgment call, not manual-proven** — see `ft991a_radio.rs`'s
+    /// module docs' "VM/AM" section.
+    async fn toggle_vfo_memory_mode(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Store VFO-A into the dedicated Quick Memory Bank slot (`QI`, manual
+    /// p.14).
+    async fn qmb_store(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Recall the Quick Memory Bank slot into VFO-A (`QR`, manual p.14).
+    async fn qmb_recall(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Toggle Quick Split (`QS`, manual p.15). **Judgment call** — see
+    /// `ft991a_radio.rs`'s module docs' "QS" section.
+    async fn quick_split(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Keyer memory store/playback (KM, KY)
+    // -----------------------------------------------------------------------
+
+    /// Read one `KM` keyer memory channel's stored message (manual p.10;
+    /// channel `1`-`5`).
+    async fn read_keyer_memory(&mut self, _channel: u8) -> RadioResult<String> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Write one `KM` keyer memory channel's message (manual p.10; channel
+    /// `1`-`5`, message 1-50 printable ASCII characters, no `;`).
+    async fn write_keyer_memory(&mut self, _channel: u8, _message: &str) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Trigger playback of a stored `KM` keyer memory channel (`KY`, manual
+    /// p.11) — distinct from the real-time RTS/DTR CW-keying feature
+    /// ([`CwKeying`]), see `ft991a.rs`'s doc comment on the equivalent
+    /// inherent method for the full distinction.
+    async fn play_keyer_memory(
+        &mut self,
+        _channel: u8,
+        _mode: KeyerPlaybackMode,
+    ) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Contour/APF (CO) and manual notch (BP)
+    // -----------------------------------------------------------------------
+
+    /// Query whether CONTOUR is on (`CO` `P2=0`, manual p.5).
+    async fn get_contour_on(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Enable/disable CONTOUR (`CO` `P2=0`).
+    async fn set_contour_on(&mut self, _on: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query the CONTOUR frequency, Hz, `10`-`3200` (`CO` `P2=1`, manual
+    /// p.5).
+    async fn get_contour_frequency_hz(&mut self) -> RadioResult<u16> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Set the CONTOUR frequency (`CO` `P2=1`).
+    async fn set_contour_frequency_hz(&mut self, _hz: u16) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query whether APF is on (`CO` `P2=2`, manual p.5).
+    async fn get_apf_on(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Enable/disable APF (`CO` `P2=2`).
+    async fn set_apf_on(&mut self, _on: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query the APF frequency, Hz, `-250`..=`250` in 10 Hz steps (`CO`
+    /// `P2=3`, manual p.5).
+    async fn get_apf_frequency_hz(&mut self) -> RadioResult<i16> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Set the APF frequency (`CO` `P2=3`).
+    async fn set_apf_frequency_hz(&mut self, _hz: i16) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query whether the manual notch is on (`BP` `P2=0`, manual p.5).
+    async fn get_manual_notch_on(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Enable/disable the manual notch (`BP` `P2=0`).
+    async fn set_manual_notch_on(&mut self, _on: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query the manual notch frequency, Hz, `10`-`3200` in 10 Hz steps
+    /// (`BP` `P2=1`, manual p.5).
+    async fn get_manual_notch_frequency_hz(&mut self) -> RadioResult<u16> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Set the manual notch frequency (`BP` `P2=1`).
+    async fn set_manual_notch_frequency_hz(&mut self, _hz: u16) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Parametric Microphone Equalizer (PR P1=1)
+    // -----------------------------------------------------------------------
+
+    /// Query whether the Parametric Microphone Equalizer is on (`PR`
+    /// `P1=1`, manual p.14).
+    async fn get_parametric_mic_eq_on(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Enable/disable the Parametric Microphone Equalizer (`PR` `P1=1`).
+    async fn set_parametric_mic_eq_on(&mut self, _on: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Front-panel encoder/key emulation (ED, EU, EK)
+    // -----------------------------------------------------------------------
+
+    /// Step the specified front-panel encoder down (`ED`, manual p.7;
+    /// `steps` must be `1`-`99`).
+    async fn encoder_down(&mut self, _encoder: EncoderSelector, _steps: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Step the specified front-panel encoder up (`EU`, manual p.7).
+    async fn encoder_up(&mut self, _encoder: EncoderSelector, _steps: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Emulate a press of the front-panel ENT key (`EK`, manual p.7;
+    /// zero-width Action trigger).
+    async fn ent_key(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Antenna tuner (AC)
+    // -----------------------------------------------------------------------
+
+    /// Query the antenna tuner state (`AC`, manual p.4; `0`=OFF, `1`=ON,
+    /// `2`=Tuning Start/Stop).
+    async fn get_antenna_tuner_state(&mut self) -> RadioResult<u8> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Set the antenna tuner state (`AC`). `state` must be `0`-`2`.
+    async fn set_antenna_tuner_state(&mut self, _state: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Dimmer (DA)
+    // -----------------------------------------------------------------------
+
+    /// Query the dimmer levels (`DA`, manual p.6): `(led_brightness,
+    /// tft_brightness)` — LED `1`-`2`, TFT `0`-`15`.
+    async fn get_dimmer(&mut self) -> RadioResult<(u8, u8)> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Set the dimmer levels (`DA`).
+    async fn set_dimmer(&mut self, _led: u8, _tft: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // Date/time/time-zone (DT)
+    // -----------------------------------------------------------------------
+
+    /// Read the current date (`DT` `P1=0`, manual p.6): `(year, month,
+    /// day)`.
+    async fn read_date(&mut self) -> RadioResult<(u16, u8, u8)> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Write the date (`DT` `P1=0`).
+    async fn write_date(&mut self, _year: u16, _month: u8, _day: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Read the current time (`DT` `P1=1`, manual p.6): `(hour, minute,
+    /// second)`, 24-hour, UTC.
+    async fn read_time(&mut self) -> RadioResult<(u8, u8, u8)> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Write the time (`DT` `P1=1`).
+    async fn write_time(&mut self, _hour: u8, _minute: u8, _second: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Read the current time zone offset in minutes (`DT` `P1=2`, manual
+    /// p.6; `-720..=840`, 30-minute steps).
+    async fn read_time_zone_offset(&mut self) -> RadioResult<i16> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Write the time zone offset (`DT` `P1=2`).
+    async fn write_time_zone_offset(&mut self, _minutes: i16) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // "TXW" (TS)
+    // -----------------------------------------------------------------------
+
+    /// Query the "TXW" on/off state (`TS`, manual p.17).
+    async fn get_txw_on(&mut self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Enable/disable "TXW" (`TS`).
+    async fn set_txw_on(&mut self, _on: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // DVS record/playback (LM, PB)
+    // -----------------------------------------------------------------------
+
+    /// Query the DVS recording state (`LM`, manual p.11): `None` = stopped,
+    /// `Some(channel)` = actively recording that channel (`1`-`5`).
+    async fn get_dvs_recording_channel(&mut self) -> RadioResult<Option<u8>> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Start (or toggle-stop, if already recording `channel`) DVS
+    /// recording on the given channel (`LM`, `1`-`5`).
+    async fn start_dvs_recording(&mut self, _channel: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Stop DVS recording (`LM` with `P2=0`).
+    async fn stop_dvs_recording(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Query the DVS playback state (`PB`, manual p.14): `None` = stopped,
+    /// `Some(channel)` = actively playing that channel (`1`-`5`).
+    async fn get_dvs_playback_channel(&mut self) -> RadioResult<Option<u8>> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Start DVS playback on the given channel (`PB`, `1`-`5`;
+    /// unconditional, not a toggle).
+    async fn start_dvs_playback(&mut self, _channel: u8) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Stop DVS playback (`PB` with `P2=0`).
+    async fn stop_dvs_playback(&mut self) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+
+    // -----------------------------------------------------------------------
+    // EX menu escape hatch (§11.4) — new, not a re-export of an existing
+    // inherent method
+    // -----------------------------------------------------------------------
+
+    /// Read an `EX` menu item's raw integer value by its `P1` menu number
+    /// (manual p.7-9). Returns [`RadioError::UnknownExMenuItem`] if `p1`
+    /// isn't a landed `EX_MENU_TABLE` row.
+    async fn get_ex_menu_item(&mut self, _p1: u16) -> RadioResult<i32> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Write an `EX` menu item's raw integer value by its `P1` menu
+    /// number. Returns [`RadioError::UnknownExMenuItem`] if `p1` isn't a
+    /// landed `EX_MENU_TABLE` row, or [`RadioError::InvalidProtocolString`]
+    /// if `value` is not legal for that item's own value kind/range.
+    async fn set_ex_menu_item(&mut self, _p1: u16, _value: i32) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CwKeying trait
+// ---------------------------------------------------------------------------
+
+/// Real-time RS-232 modem control/status line access for CW keying —
+/// distinct from [`Ft991aExtras::play_keyer_memory`] (`KY`, which plays
+/// back a *pre-stored* `KM` message via CAT). This backs `EX` menu item
+/// 060 "PC KEYING" when set to `2: RTS` or `3: DTR` (manual p.8): the PC
+/// asserts/clears RTS or DTR directly, with no CAT command involved at
+/// all, to key CW in real time.
+///
+/// Per `planning/architect/task_plan.md` §10.3, these are plain sync
+/// `fn`s, not `#[async_trait]` — matching the precedent
+/// `cat_transport_core::ModemControlLines` itself sets (direct
+/// `ioctl(2)` calls, no I/O wait), not [`Radio`]/[`Ft991aExtras`]'s async
+/// idiom.
+///
+/// Implemented for `impl<S: CatSession<Error = TransportError> +
+/// ModemControlLines> CwKeying for Ft991a<S>` — the same bound the
+/// existing (Wave 3) `assert_rts`/`assert_dtr`/`read_cts`/`read_dsr`/
+/// `read_dcd` inherent-method impl block already uses. This is the
+/// **one** trait in this pair that stays genuinely conditional on the
+/// transport, by design: a future non-serial transport without modem
+/// control lines simply won't implement it — a compile-time signal,
+/// not a silent runtime [`RadioError::NotImplemented`] (though the
+/// default bodies below still return that, for any `S` that *does*
+/// implement this trait but wants to no-op a subset).
+pub trait CwKeying {
+    /// Assert or clear RTS. Present on the RS-232C 9-pin CAT connector,
+    /// pin 7 (manual p.1).
+    fn assert_rts(&self, _asserted: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Assert or clear DTR. **Not present on the RS-232C 9-pin CAT
+    /// connector** — only reachable via a USB Dual-UART bridge connection.
+    fn assert_dtr(&self, _asserted: bool) -> RadioResult<()> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Read the current CTS (Clear To Send) status line state. Present on
+    /// the RS-232C CAT connector, pin 8 (manual p.1).
+    fn read_cts(&self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Read the current DSR (Data Set Ready) status line state. **Not
+    /// present on the RS-232C 9-pin CAT connector.**
+    fn read_dsr(&self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+    /// Read the current DCD (Data Carrier Detect) status line state.
+    /// **Not present on the RS-232C 9-pin CAT connector.**
+    fn read_dcd(&self) -> RadioResult<bool> {
+        Err(RadioError::NotImplemented)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NopRadio
 // ---------------------------------------------------------------------------
 
@@ -1812,6 +2210,16 @@ pub struct NopRadio;
 
 #[async_trait(?Send)]
 impl Radio for NopRadio {}
+
+// Also satisfies the widened `ui::run<R: Radio + Ft991aExtras + CwKeying +
+// 'static>` bound (`planning/architect/task_plan.md` §11.3 point 3's last
+// bullet) via the traits' own `NotImplemented` defaults — kept in sync with
+// this crate's own `NopRadio`, same mechanical addition a future `ui`
+// crate's `MockRadio` test double needs.
+#[async_trait(?Send)]
+impl Ft991aExtras for NopRadio {}
+
+impl CwKeying for NopRadio {}
 
 // ---------------------------------------------------------------------------
 // Tests

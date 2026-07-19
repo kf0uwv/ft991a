@@ -15,10 +15,12 @@ a shared, radio-independent CAT engine — the first being
   were found and resolved along the way (documented in `planning/yaesu/`).
   Includes RTS/DTR-based real-time CW keying (`EX` menu 060 "PC KEYING") via
   `radio-cat-rs`'s `ModemControlLines` capability.
-- **`ui`** — a ratatui/crossterm terminal interface, currently a flat
-  single-screen design (built when the command surface was much smaller); a
-  grouped-menu redesign proportional to the full 91-command/151-setting
-  surface is in progress.
+- **`ui`** — a ratatui/crossterm terminal interface with a 12-group menu
+  proportional to the full command surface, plus two ways to reach any of
+  the 151 `EX` menu items: a number-entry escape hatch and themed browsing
+  (with real scrolling for the largest, 45-item theme). RTS-based real-time
+  CW keying is reachable from the Keyer/CW group with optimistic-toggle/
+  rollback-on-error semantics.
 - **`emulator`** — a PTY-hosted FT-991A protocol simulator for testing
   without real hardware, mirroring `ts570d`'s emulator.
 - **Windows**: `cat-transport-serial` (in `radio-cat-rs`) has a native Win32

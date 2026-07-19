@@ -1330,3 +1330,88 @@ every one of the 153 manual menu numbers except 027 ("TIME ZONE") and 087
   are 027 and 087, both explicitly and permanently skipped as
   unresolvable from this manual (documented in the second/first
   sub-batches respectively) — not oversights, not left for "next time."
+
+---
+
+## Wave 4 — Task 1: `Ft991aExtras`/`CwKeying` traits + `EX` label extension (2026-07-19)
+
+- **Architect's "~20 existing inherent-only async methods" estimate
+  (§11.3 point 3) was a real undercount, confirmed by direct
+  verification, not just accepted** — the actual count is **48**. Traced
+  to the architect's summary being category-level ("keyer memory, QMB,
+  encoder nudges, antenna tuner, dimmer, date/time, DVS,
+  contour/APF/manual-notch, `IF` composite") rather than a per-method
+  count; several categories are 4-6 methods each (date/time alone is 6:
+  read/write × date/time/timezone; DVS is 6: get-channel + start/stop ×
+  record/playback). Per the task's explicit instruction to verify this
+  myself rather than trust the approximation, cross-referenced every
+  `pub async fn` in `Ft991a<S>`'s main impl block against every method
+  already on the `Radio` trait, by name, and only what's left over
+  (genuinely inherent-only) went into `Ft991aExtras`. Final count: 48
+  re-exported + 2 new (`get`/`set_ex_menu_item`) = 50 methods on
+  `Ft991aExtras`; 5 on `CwKeying` (unchanged from the architect's
+  estimate — that one was already exact).
+
+- **`flush_rx` is already on the `Radio` trait itself** — a sync,
+  default-no-op method (`fn flush_rx(&mut self) {}`), easy to miss with
+  an `async fn`-only grep of `ft991a.rs`'s inherent methods. Confirmed by
+  checking `radio_trait.rs`'s `Radio` trait definition directly (not just
+  grepping `ft991a.rs`) before finalizing the `Ft991aExtras` candidate
+  list — correctly excluded from `Ft991aExtras` (it's not "inherent-only",
+  it's already trait-backed).
+
+- **Coherence claim verified by compiling, not trusted on the architect's
+  word** — `cargo build -p radio` succeeded on the first attempt after
+  adding both `impl<S: CatSession<Error = TransportError>> Ft991aExtras
+  for Ft991a<S>` and `impl<S: CatSession<Error = TransportError> +
+  ModemControlLines> CwKeying for Ft991a<S>`. Zero `E0119`
+  overlapping-impl errors. This is the load-bearing confirmation the
+  architect's §11.3 point 3/4 reasoning predicted but the task explicitly
+  required re-verifying independently.
+
+- **`ExMenuValueKind::Enumerated` label extraction — zero mismatches
+  across all 79 items, sourced entirely from this file's own pre-existing
+  doc comments**: wrote a scratchpad-only Python script to parse
+  `EX_MENU_TABLE`'s live array (getting each item's authoritative wire
+  values) and its own doc-comment legend tables (getting each item's
+  manual-cited labels), cross-referenced by P1, and asserted the wire
+  values matched exactly before generating any replacement code. Two
+  items needed special resolution, both already flagged in the existing
+  doc comments rather than newly discovered: items 018-022 ("CW MEMORY
+  1-5") share one combined doc row (`018-022 | CW MEMORY 1-5 |
+  0:TEXT 1:MESSAGE`); items 031/032 ("CAT RATE"/"CAT TOT") are documented
+  as "same shape as" 029/030 and resolve through those items' legends.
+  No item's label had to be freshly transcribed from the manual PDF — the
+  task's "reuse existing doc-comment transcriptions" instruction held for
+  100% of the 79 `Enumerated` items, not just "most."
+
+- **Labels preserve genuine manual inconsistencies verbatim, not
+  normalized** — spot-checked in the new tests: item 072 "DATA PORT
+  SELECT" is `[("1","DATA"),("2","USB")]` (starts at 1), while item 048
+  "AM PORT SELECT" is `[("0","DATA"),("1","USB")]` (starts at 0) — the
+  same already-documented "genuine manual inconsistency, transcribed
+  exactly" this table's doc comment already called out before this task
+  touched it. The label extension didn't introduce a new inconsistency;
+  it faithfully carried the existing one into the new tuple shape.
+
+- **`ExMenuValueKind::parse`/`format` widened from private to
+  `pub(crate)`, a deliberate minimal-scope visibility change** — needed
+  so `ft991a.rs`'s new `get_ex_menu_item`/`set_ex_menu_item` (a different
+  module in the same crate) can call the exact same parse/format logic
+  `Ft991aRadio::handle_command`'s `Ex` arm already uses server-side,
+  rather than reimplementing menu-value parsing client-side (the task's
+  explicit instruction). `pub(crate)`, not `pub`, since no consumer
+  outside this crate needs it.
+
+- **`RadioError::UnknownExMenuItem(u16)` added** — nothing existing fit
+  cleanly (`UnknownCommand(String)` is for wire command codes like `"XY"`,
+  not an `EX` `P1` menu number; every other `Invalid*` variant is
+  concept-specific). New variant, same shape/idiom as every other
+  `RadioError` variant.
+
+- **`Ft991aExtras`/`CwKeying` needed re-exporting from `lib.rs`'s crate
+  root** — `ft991a.rs` writes `impl<S> crate::Ft991aExtras for Ft991a<S>`,
+  which only resolves if `Ft991aExtras` is visible at `crate::` (i.e.
+  re-exported in `lib.rs`, matching how `Radio` already is). Caught
+  immediately by the first `cargo build` attempt (E0405), not a silent
+  gap.

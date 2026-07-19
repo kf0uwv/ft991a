@@ -2012,3 +2012,152 @@ bulk-checkout timestamp. `ui/`, `emulator/`, `src/main.rs`, root
 151 of the 153 possible menu numbers are landed; 027 ("TIME ZONE") and
 087 ("RADIO ID") are permanently unresolvable from this manual alone (no
 wire-encoding formula stated for either), not deferred work.
+
+---
+
+# Wave 4 — Task 1: `Ft991aExtras`/`CwKeying` traits + `EX` label extension (2026-07-19)
+
+Per `planning/architect/task_plan.md` §11.3 point 3 (trait design/bounds),
+§11.3 point 4 (why this doesn't violate `CLAUDE.md`'s dependency rules),
+§11.4 first two paragraphs (`get`/`set_ex_menu_item` +
+`ExMenuValueKind::Enumerated` label extension), and §11.6 dispatch item 1
+("the `radio`-crate prerequisite... blocks everything else"). Read all
+three sections in full before starting, plus `radio/src/ft991a.rs` (to
+find the actual complete inherent-only method set — the architect's "~20"
+was explicitly flagged as an approximation not to be trusted), and
+`radio/src/radio_trait.rs` (the `Radio` trait's default-body idiom to
+mirror exactly).
+
+## Scope
+
+`radio/` crate only: `radio/src/{ft991a.rs, ft991a_radio.rs, radio_trait.rs,
+lib.rs}`. Per task constraints, `ui/`, `emulator/`, `src/main.rs`, root
+`Cargo.toml`, `ts570d`, `radio-cat-rs` not touched (confirmed via `git
+status` at the end — only these four files are modified; `emulator/src/
+tui.rs` and `planning/emulator/*` showed up as modified too, but that is a
+different, concurrently-running agent's work, not this task's — this
+task's own tool-call history never opened those files).
+
+## Step 1: verify the actual inherent-only method count myself
+
+Grepped every `pub async fn`/`pub fn` in both `impl<S> Ft991a<S> where S:
+CatSession<Error = TransportError>>` blocks (the main one, lines ~522-2505
+pre-edit, and the small `IF`-adjacent methods) and cross-referenced
+against every method already on the `Radio` trait (`radio_trait.rs`).
+Result: **48** inherent-only methods qualify for `Ft991aExtras` (not the
+architect's approximate "~20") — the discrepancy is explained by the
+architect's summary naming *categories* ("keyer memory, QMB, encoder
+nudges, antenna tuner, dimmer, date/time, DVS, contour/APF/manual-notch,
+`IF` composite") rather than counting every method within each category
+(e.g. "date/time" alone is 6 methods: `read_date`/`write_date`/
+`read_time`/`write_time`/`read_time_zone_offset`/`write_time_zone_offset`;
+"DVS" is 6: record channel query + start/stop, playback channel query +
+start/stop). Plus the 5 already-landed `ModemControlLines`-bound methods
+(`assert_rts`/`assert_dtr`/`read_cts`/`read_dsr`/`read_dcd`) for
+`CwKeying`, and the 2 genuinely new `get_ex_menu_item`/`set_ex_menu_item`
+methods for `Ft991aExtras` — for a final count of **50 methods on
+`Ft991aExtras`, 5 on `CwKeying`**. `flush_rx` was confirmed to already be
+on the `Radio` trait itself (a sync default-no-op method, easy to miss
+with an `async fn`-only grep) — correctly excluded from both new traits.
+
+## Step 2: `ExMenuValueKind::Enumerated` label extension — done first, mechanically
+
+Extended `Enumerated(&'static [&'static str])` to `Enumerated(&'static
+[(&'static str, &'static str)])` — `(wire, label)` pairs, per the
+architect's own suggested shape. Rather than hand-transcribing labels for
+79 `Enumerated` `EX_MENU_TABLE` rows by eye (error-prone at this scale),
+wrote a small Python script (scratchpad-only, not committed) that:
+1. Parsed the live `EX_MENU_TABLE` array (151 `ExMenuItem` entries: 79
+   `Enumerated`, 72 `Range` — confirmed by parsing, not assumed) to get
+   each item's exact current wire-value list.
+2. Parsed `EX_MENU_TABLE`'s own doc-comment legend tables (the `| P1 |
+   Name | P2 legal values | Digits |` markdown rows already in the file,
+   covering all four `EX` sub-batches) to get each item's manual-cited
+   label legend.
+3. Cross-referenced by P1, resolving two special cases already flagged in
+   the doc comments: items 018-022 ("CW MEMORY 1-5") share one combined
+   doc row; items 031/032 ("CAT RATE"/"CAT TOT") are documented as "same
+   shape as" 029/030 and resolve through those rows' legends.
+4. Asserted every resolved item's wire-value list matched the array's own
+   list exactly (order and content) before writing anything back —
+   **zero mismatches across all 79 items**, confirming every label traces
+   to this file's own pre-existing manual-citation doc comments, per the
+   task's explicit instruction not to guess or re-read the manual for
+   already-documented items.
+
+Applied via 79 in-place regex substitutions (verified against the exact
+match count first), then `cargo build`/`cargo fmt -p radio` to confirm
+compilation and let `rustfmt` reflow the now-longer array literals (some,
+e.g. item 118 "WATER FALL COLOR" with 8 label pairs, wrap across multiple
+lines). `ExMenuValueKind::parse` updated (`values.contains(&wire)` →
+`values.iter().any(|(w, _)| *w == wire)`); `ExMenuValueKind::format`
+unchanged (formats an already-validated integer, doesn't touch labels).
+Added `ExMenuValueKind::label_for_value` as a small forward-looking
+convenience (not consumed anywhere in this crate yet — flagged for a
+future `ui` `ListSelect` consumer per §11.4). `parse`/`format` widened
+from private to `pub(crate)` so `ft991a.rs`'s new
+`get_ex_menu_item`/`set_ex_menu_item` can reuse them directly rather than
+reimplementing menu-value parsing client-side, per the task's explicit
+"reuse the existing table/logic" instruction.
+
+## Step 3: traits + impls + `get`/`set_ex_menu_item`
+
+- `Ft991aExtras` (async, `#[async_trait(?Send)]`, `radio_trait.rs`): 50
+  methods (48 re-export forwards + 2 new), every default body `Err(
+  RadioError::NotImplemented)`, identical idiom to `Radio`. `impl<S:
+  CatSession<Error = TransportError>> Ft991aExtras for Ft991a<S>`
+  (`ft991a.rs`) — every re-export method is a one-line forward to the
+  pre-existing inherent method of the same name; `get_ex_menu_item`/
+  `set_ex_menu_item` are new inherent methods (added to the main impl
+  block) that look up `ex_menu_item(p1)` first (returning the new
+  `RadioError::UnknownExMenuItem(u16)` variant if absent — nothing
+  reusable fit, so a variant was added, mirroring every other
+  `RadioError::Invalid*`/`Unknown*` variant's shape), then round-trip
+  through the now-`pub(crate)` `ExMenuValueKind::parse`/`format`.
+  `set_ex_menu_item` validates client-side (format then re-parse,
+  matching the value) *before* sending, so an illegal value surfaces as
+  `RadioError::InvalidProtocolString` attributable to the call rather
+  than a generic rejected-wire-frame error.
+- `CwKeying` (sync `&self`, plain `fn`s — matching
+  `ModemControlLines`/the existing Wave-3 `assert_rts`-etc. precedent, NOT
+  async): 5 thin forwarding methods. `impl<S: CatSession<Error =
+  TransportError> + ModemControlLines> CwKeying for Ft991a<S>` — the
+  *same* bound the existing (Wave 3, §10.4) inherent-method impl block
+  already uses.
+- **Coherence verified by actually compiling, not just trusting the
+  architect's claim**: `cargo build -p radio` after adding both impl
+  blocks succeeded on the first attempt with zero `E0119`
+  overlapping-impl errors — confirming `Ft991aExtras`'s unconditional `S:
+  CatSession` bound and `CwKeying`'s narrower `S: CatSession +
+  ModemControlLines` bound genuinely don't collide, exactly as §11.3
+  point 3/4 reasoned through (unlike the ruled-out alternative of folding
+  these methods directly into `Radio`, which *would* need two
+  overlapping `impl Radio for Ft991a<S>` blocks).
+- `Ft991aExtras`/`CwKeying` re-exported from `lib.rs`'s crate root
+  (needed — `ft991a.rs`'s `impl<S> crate::Ft991aExtras for ...` doesn't
+  resolve otherwise; caught by the first `cargo build` attempt).
+- Added `impl Ft991aExtras for NopRadio {}` / `impl CwKeying for NopRadio
+  {}` (both trivial, inheriting the traits' own `NotImplemented`
+  defaults) so this crate's existing `NopRadio` stays usable against the
+  widened `ui::run<R: Radio + Ft991aExtras + CwKeying>` bound §11.3
+  anticipates — not required by the task's own instructions, but cheap
+  and keeps `NopRadio` from silently becoming stale, same category of
+  mechanical addition the architect flagged for a future `ui::MockRadio`.
+
+## Verification
+
+`cargo build -p radio`: clean (confirms coherence, see above). `cargo test
+-p radio`: **517 unit tests + 1 doctest, all passing** (up from 501+1 — 16
+new tests, zero regressions: all 501 prior tests pass completely
+unmodified, since the `Enumerated` label extension only changed the
+enum's associated data, not its match-ability, and no existing test
+constructed an `Enumerated(&[...])` literal directly — confirmed by grep
+before editing). `cargo clippy -p radio --all-targets -- -D warnings`:
+clean, no fixes needed. `cargo fmt --check -p radio`: clean after one
+`cargo fmt -p radio` pass (line-wrapping of the newly-long `Enumerated`
+tuple arrays and one over-long `play_keyer_memory` forwarding signature,
+no logic changes). Confirmed via `git status`/`git diff --stat` that only
+`radio/src/{ft991a.rs, ft991a_radio.rs, lib.rs, radio_trait.rs}` were
+modified by this task (1188 insertions, 99 deletions across the four
+files) — `ui/`, `emulator/`, `src/main.rs`, root `Cargo.toml`, `ts570d/`,
+`radio-cat-rs/` untouched. No commits made.

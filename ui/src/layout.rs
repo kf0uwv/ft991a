@@ -19,8 +19,19 @@
 //! display is command-count-independent (§6.1). `draw_status` is new
 //! (collapsed 2-row body vs. ts570d's 5-row inner status layout, since this
 //! slice has no receiver-features/flags row content — §6.3).
-//! `draw_control_panel` is simplified to `Normal`/`TextInput`/`ListSelect`/
-//! `Feedback` only — no `GroupMenu`/`Diagnostic` arms (§6.1).
+//! `draw_control_panel` now renders the grouped-menu skeleton's
+//! `Menu`/`GroupMenu` states (§11.2, Wave 4 Task 2) in addition to the
+//! `TextInput`/`ListSelect`/`Feedback` states carried over unchanged from
+//! Wave 2 — still no `Diagnostic` arm (§6.1, reaffirmed §11.6 item 2).
+//! `draw_status`'s row 1 also gains a small `RTS: ON/OFF` indicator (Wave 4
+//! Task 4, §11.3 point 6) next to the existing `TX`/`RX` indicator —
+//! reuses `tx_state_label`'s (label, color) rendering pattern via the new
+//! `rts_label` helper, no new render function needed. `draw_control_panel`
+//! gains one more arm for `ControlState::ExSubGroupMenu` (§11.4 path (a),
+//! Wave 4 Task 9 — the wave's final task): `draw_ex_sub_group_menu` is the
+//! first genuinely **scrolling** list in this crate (as opposed to
+//! `GroupMenu`'s fixed, never-scrolled command column), needed because `EX`
+//! sub-groups hold up to 45 items.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -32,7 +43,10 @@ use ratatui::{
 
 use radio::TxState;
 
-use crate::control::{keybinding_labels, ControlState};
+use crate::control::{
+    ex_theme_items, ex_theme_label, group_command_labels, group_label, menu_group_labels,
+    ControlState, ExTheme,
+};
 use crate::Ft991aDisplay;
 
 /// Format a frequency in Hz as "M.KKK.HHH MHz". Reused from ts570d's
@@ -86,6 +100,18 @@ fn tx_state_label(state: TxState) -> (&'static str, Color) {
         TxState::Off => ("RX", Color::Green),
         TxState::CatKeyed => ("TX", Color::Red),
         TxState::RadioKeyedNonCat => ("TX (ext)", Color::Yellow),
+    }
+}
+
+/// The [`Ft991aDisplay::rts_asserted`] -> (label, color) rendering rule,
+/// mirroring [`tx_state_label`]'s pattern for group 5's real-time RTS
+/// CW-keying toggle (§11.3 point 6). Red/bold when asserted (actively
+/// keying, same visual weight as `TX`), dim gray when not.
+fn rts_label(asserted: bool) -> (&'static str, Color) {
+    if asserted {
+        ("ON", Color::Red)
+    } else {
+        ("OFF", Color::DarkGray)
     }
 }
 
@@ -236,6 +262,7 @@ pub fn draw_status(f: &mut Frame, area: Rect, state: &Ft991aDisplay) {
     // -----------------------------------------------------------------
 
     let (tx_text, tx_color) = tx_state_label(state.tx_state);
+    let (rts_text, rts_color) = rts_label(state.rts_asserted);
 
     let line1 = Line::from(vec![
         Span::styled("VFO A  ", Style::default().fg(Color::DarkGray)),
@@ -263,6 +290,12 @@ pub fn draw_status(f: &mut Frame, area: Rect, state: &Ft991aDisplay) {
         Span::styled(
             tx_text,
             Style::default().fg(tx_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("RTS:", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            rts_text,
+            Style::default().fg(rts_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -349,26 +382,60 @@ fn build_menu_column(items: &[(char, &'static str)]) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Draw the interactive control panel. Simplified to
-/// `Normal`/`TextInput`/`ListSelect`/`Feedback` only — no
-/// `GroupMenu`/`Diagnostic` arms (§6.1, §6.7).
+/// Draw the interactive control panel: the top-level `Menu` group list, a
+/// `GroupMenu`'s own command list (or a "no commands yet" placeholder for
+/// groups not yet populated — §11.2, Wave 4 Task 2), or the `TextInput`/
+/// `ListSelect`/`Feedback` 3-line layout carried over unchanged from Wave 2
+/// (§6.3).
 pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
     let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
 
     match state {
-        ControlState::Normal => {
-            // Single flat column — 9 commands fit on one screen with room
-            // to spare (§6.1), unlike ts570d's 2-column 8-group menu.
-            let labels = keybinding_labels();
-            f.render_widget(Paragraph::new(build_menu_column(&labels)), inner);
+        ControlState::Menu => {
+            let mut items = menu_group_labels();
+            items.push(('Q', "Quit"));
+            f.render_widget(Paragraph::new(build_menu_column(&items)), inner);
+        }
+
+        ControlState::GroupMenu { group, .. } => {
+            let labels = group_command_labels(*group);
+            let mut lines: Vec<Line> = if labels.is_empty() {
+                vec![Line::from(Span::styled(
+                    format!("{} — no commands yet", group_label(*group)),
+                    Style::default().fg(Color::DarkGray),
+                ))]
+            } else {
+                build_menu_column(&labels)
+            };
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "[Esc] Back",
+                Style::default().fg(Color::DarkGray),
+            )));
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+
+        // `EX` themed sub-group browsing (§11.4 path (a), Wave 4 Task 9).
+        // Unlike `GroupMenu`'s fixed, unscrolled command column, sub-groups
+        // can hold up to 45 items — genuinely scrolled around `cursor`, not
+        // just listed, since a typical terminal's control-panel area can't
+        // show that many rows at once.
+        ControlState::ExSubGroupMenu { theme, cursor } => {
+            draw_ex_sub_group_menu(f, inner, *theme, *cursor);
         }
 
         // For input/selection/feedback states, use the same 3-line layout
         // ts570d uses (state-shape-driven, not group-count-driven — reused
-        // verbatim per §6.3).
-        _ => {
+        // verbatim per §6.3). `ExNumberEntry` (§11.4, path (b), Wave 4 Task
+        // 8) joins this group too — per the architect's own design, it
+        // "reuses the `TextInput` rendering shell" rather than getting a
+        // distinct visual treatment.
+        ControlState::TextInput { .. }
+        | ControlState::ListSelect { .. }
+        | ControlState::Feedback { .. }
+        | ControlState::ExNumberEntry { .. } => {
             let lines = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -379,6 +446,23 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                 .split(inner);
 
             match state {
+                ControlState::ExNumberEntry { buffer, error } => {
+                    f.render_widget(Paragraph::new("EX menu item number (001-153):"), lines[0]);
+                    if let Some(err) = error {
+                        let err_line = Line::from(vec![Span::styled(
+                            format!("⚠ {}", err),
+                            Style::default().fg(Color::Red),
+                        )]);
+                        f.render_widget(Paragraph::new(err_line), lines[1]);
+                    }
+                    let input_line = Line::from(vec![
+                        Span::raw("> "),
+                        Span::raw(buffer.as_str()),
+                        Span::styled("_", Style::default().fg(Color::Yellow)),
+                    ]);
+                    f.render_widget(Paragraph::new(input_line), lines[2]);
+                }
+
                 ControlState::TextInput {
                     prompt,
                     buffer,
@@ -439,11 +523,95 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                     f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
                 }
 
-                // Normal is handled above.
-                ControlState::Normal => {}
+                // Menu, GroupMenu, and ExSubGroupMenu are handled above.
+                ControlState::Menu
+                | ControlState::GroupMenu { .. }
+                | ControlState::ExSubGroupMenu { .. } => {}
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// draw_ex_sub_group_menu — §11.4 path (a), Wave 4 Task 9
+// ---------------------------------------------------------------------------
+
+/// Draw one `EX` themed sub-group's scrollable item list
+/// (`ControlState::ExSubGroupMenu`).
+///
+/// Unlike `GroupMenu`'s command column (fixed-size, never scrolled — see
+/// `control.rs`'s `ControlState::GroupMenu` doc comment on why its own
+/// `cursor` field stays vestigial), this **is** a genuinely scrolling view:
+/// `ExTheme::GeneralAgcCw` alone holds 45 items, well past what a typical
+/// terminal's control-panel area (`split_areas`' `Constraint::Min(8)` —
+/// often well under 20 rows once header/status/errors take their fixed
+/// share) can show at once. A fixed, unscrolled 45-line list would run off
+/// the bottom of the panel on any ordinary terminal size, so `cursor`
+/// drives a sliding window (centered on `cursor` where the list is longer
+/// than the available height) instead.
+fn draw_ex_sub_group_menu(f: &mut Frame, area: Rect, theme: ExTheme, cursor: usize) {
+    let items = ex_theme_items(theme);
+
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!(
+                "{} — item {} of {}",
+                ex_theme_label(theme),
+                items.len().min(cursor + 1),
+                items.len()
+            ),
+            header_style,
+        )),
+        Line::from(""),
+    ];
+
+    // Reserve the 2 header lines above plus a trailing blank + hint line
+    // below from the scrolling window's own height budget.
+    let visible = (area.height as usize).saturating_sub(4).max(1);
+    let start = if items.len() <= visible {
+        0
+    } else {
+        cursor
+            .saturating_sub(visible / 2)
+            .min(items.len() - visible)
+    };
+    let end = (start + visible).min(items.len());
+
+    for (offset, item) in items[start..end].iter().enumerate() {
+        let idx = start + offset;
+        let text = format!("{:03} {}", item.p1, item.name);
+        if idx == cursor {
+            lines.push(Line::from(Span::styled(
+                format!("> {text}"),
+                selected_style,
+            )));
+        } else {
+            lines.push(Line::from(Span::raw(format!("  {text}"))));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("[Up/Down]", key_style),
+        Span::styled(" scroll  ", hint_style),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" select  ", hint_style),
+        Span::styled("[Esc]", key_style),
+        Span::styled(" back", hint_style),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 // ---------------------------------------------------------------------------
@@ -515,5 +683,15 @@ mod tests {
     fn test_ft991a_display_default_smoke() {
         let d = Ft991aDisplay::default();
         assert_eq!(d.vfo_a_hz, 14_000_000);
+    }
+
+    #[test]
+    fn test_rts_label_off_is_dark_gray() {
+        assert_eq!(rts_label(false), ("OFF", Color::DarkGray));
+    }
+
+    #[test]
+    fn test_rts_label_on_is_red() {
+        assert_eq!(rts_label(true), ("ON", Color::Red));
     }
 }

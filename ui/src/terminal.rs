@@ -18,6 +18,14 @@
 //! screen setup, panic-safe restore, and 200ms-poll/10ms-event-poll/5ms-
 //! idle-sleep timing (§6.6) — that part is command-count-independent.
 //!
+//! **Wave 4 Task 4 (§11.3 point 6):** `execute_action`'s bound widens to
+//! `Radio + Ft991aExtras + CwKeying` and it gains a `display: &mut
+//! Ft991aDisplay` parameter, needed by group 5's real-time RTS CW-keying
+//! toggle — the one action that mutates the live display state directly
+//! (optimistic set, rolled back on `CwKeying::assert_rts` error) rather
+//! than waiting for the next poll cycle. See `execute_action`'s own doc
+//! comment for the full rationale.
+//!
 //! **Architecture note (judgment call, see `planning/ui/task_plan.md`
 //! decision 3):** ts570d splits polling and key-handling into two
 //! `monoio::spawn`-ed tasks linked by channels, so key events stay
@@ -36,7 +44,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use radio::{Frequency, Radio, RadioResult};
+use radio::{
+    CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Radio, RadioResult,
+    TaggedMemoryChannel,
+};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
@@ -165,6 +176,15 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut Ft991aDisplay) {
 /// Execute a validated [`ExecuteAction`] against the radio, returning a
 /// human-readable description and the result.
 ///
+/// Returns `(&'static str, RadioResult<String>)` where the `String` is
+/// extra feedback text — non-empty for the read-type actions added by Wave
+/// 4 Task 3 ([`ExecuteAction::GetMemoryChannel`],
+/// [`ExecuteAction::ReadMemoryChannel`],
+/// [`ExecuteAction::ReadMemoryChannelTag`]), empty for every plain "set"
+/// action (mirroring `ts570d::ui::terminal::execute_action`'s own return
+/// shape and its `run_loop`'s "use the extra text if present, else `OK:
+/// {desc}`" convention, adopted verbatim below).
+///
 /// The `O` key ([`ExecuteAction::TogglePowerOn`]) calls
 /// [`Radio::set_power_on`] directly, which is a faithful 1:1 `PS<0/1>;`
 /// mapping (`radio/src/ft991a.rs` lines ~298-309) that deliberately does
@@ -173,44 +193,569 @@ async fn poll_radio_state<R: Radio>(radio: &mut R, state: &mut Ft991aDisplay) {
 /// `wake_and_power_on()` helper, not yet on the `Radio` trait (§6.5). If
 /// the radio is in deep standby, this may not wake it; that is an inherited
 /// limitation from the `radio` crate, not something this UI works around.
-async fn execute_action<R: Radio>(
+///
+/// **`display: &mut Ft991aDisplay` (Wave 4 Task 4, §11.3 point 6):** needed
+/// solely for [`ExecuteAction::ToggleRts`] — `rts_asserted` is tracked
+/// **locally**, never polled (see the field's own doc comment in
+/// `lib.rs`), so this is the one action whose executor must mutate the
+/// live display state directly rather than just reading it: it sets
+/// `rts_asserted` to the new value *optimistically*, before the
+/// [`radio::CwKeying::assert_rts`] call, then rolls it back to the prior
+/// value if that call returns an `Err`. Every other action leaves
+/// `display` untouched (its fields are refreshed by the next
+/// [`poll_radio_state`] cycle instead).
+async fn execute_action<R: Radio + Ft991aExtras + CwKeying>(
     radio: &mut R,
     action: ExecuteAction,
-) -> (&'static str, RadioResult<()>) {
+    display: &mut Ft991aDisplay,
+) -> (&'static str, RadioResult<String>) {
+    /// Convert a unit result to a `String` result with no extra feedback
+    /// text — see this function's own doc comment.
+    fn ok_unit(r: RadioResult<()>) -> RadioResult<String> {
+        r.map(|()| String::new())
+    }
+
     match action {
         ExecuteAction::SetVfoA(hz) => {
             let r = match Frequency::new(hz) {
                 Ok(f) => radio.set_vfo_a(f).await,
                 Err(e) => Err(e),
             };
-            ("VFO A set", r)
+            ("VFO A set", ok_unit(r))
         }
         ExecuteAction::SetVfoB(hz) => {
             let r = match Frequency::new(hz) {
                 Ok(f) => radio.set_vfo_b(f).await,
                 Err(e) => Err(e),
             };
-            ("VFO B set", r)
+            ("VFO B set", ok_unit(r))
         }
-        ExecuteAction::SetMode(mode) => ("Mode set", radio.set_mode(mode).await),
+        ExecuteAction::SetMode(mode) => ("Mode set", ok_unit(radio.set_mode(mode).await)),
         // §6.5: `T` always sends transmit()/receive() based on the *last
         // polled* TxState — CatKeyed means this session already asserted
         // PTT, so toggle it off; Off or RadioKeyedNonCat both mean this
         // session has not asserted PTT via CAT, so assert it.
         ExecuteAction::ToggleTx(last_state) => {
             if last_state == radio::TxState::CatKeyed {
-                ("RX (CAT)", radio.receive().await)
+                ("RX (CAT)", ok_unit(radio.receive().await))
             } else {
-                ("TX (CAT)", radio.transmit().await)
+                ("TX (CAT)", ok_unit(radio.transmit().await))
             }
         }
-        ExecuteAction::SetAfGain(v) => ("AF gain set", radio.set_af_gain(v).await),
-        ExecuteAction::SetRfGain(v) => ("RF gain set", radio.set_rf_gain(v).await),
-        ExecuteAction::SetSquelch(v) => ("Squelch set", radio.set_squelch(v).await),
-        ExecuteAction::SetPower(v) => ("TX power set", radio.set_power(v).await),
-        ExecuteAction::TogglePowerOn(currently_on) => {
-            ("Power toggled", radio.set_power_on(!currently_on).await)
+        ExecuteAction::SetAfGain(v) => ("AF gain set", ok_unit(radio.set_af_gain(v).await)),
+        ExecuteAction::SetRfGain(v) => ("RF gain set", ok_unit(radio.set_rf_gain(v).await)),
+        ExecuteAction::SetSquelch(v) => ("Squelch set", ok_unit(radio.set_squelch(v).await)),
+        ExecuteAction::SetPower(v) => ("TX power set", ok_unit(radio.set_power(v).await)),
+        ExecuteAction::TogglePowerOn(currently_on) => (
+            "Power toggled",
+            ok_unit(radio.set_power_on(!currently_on).await),
+        ),
+
+        // --- Group 3 (MemoryChannels) ---
+        ExecuteAction::SelectMemoryChannel(ch) => (
+            "Memory channel selected",
+            ok_unit(radio.set_memory_channel(ch).await),
+        ),
+        ExecuteAction::GetMemoryChannel => match radio.get_memory_channel().await {
+            Ok(ch) => (
+                "Memory channel",
+                Ok(format!("Selected memory channel: {ch}")),
+            ),
+            Err(e) => ("Get memory channel", Err(e)),
+        },
+        ExecuteAction::ReadMemoryChannel(ch) => match radio.read_memory_channel(ch).await {
+            Ok(entry) => (
+                "Memory channel read",
+                Ok(format!(
+                    "CH{:03}: {} Hz {}",
+                    entry.channel,
+                    entry.frequency_hz,
+                    entry.mode.name()
+                )),
+            ),
+            Err(e) => ("Read memory channel", Err(e)),
+        },
+        ExecuteAction::WriteMemoryChannelFromVfoA(ch) => {
+            // Query VFO A/mode fresh at execution time rather than trusting
+            // a `Ft991aDisplay` snapshot captured when the key was pressed
+            // — mirrors `ts570d::ui`'s own `WriteMemoryChannelFromVfoA`.
+            match (radio.get_vfo_a().await, radio.get_mode().await) {
+                (Ok(freq), Ok(mode)) => {
+                    let entry = MemoryChannelEntry {
+                        channel: ch,
+                        frequency_hz: freq.hz(),
+                        clarifier_offset_hz: 0,
+                        rx_clarifier_on: false,
+                        tx_clarifier_on: false,
+                        mode,
+                        tone_status: 0,
+                        offset_type: 0,
+                    };
+                    (
+                        "Memory channel written from VFO A",
+                        ok_unit(radio.write_memory_channel(entry).await),
+                    )
+                }
+                (Err(e), _) | (_, Err(e)) => ("Memory channel written from VFO A", Err(e)),
+            }
         }
+        ExecuteAction::ReadMemoryChannelTag(ch) => match radio.read_memory_channel_tag(ch).await {
+            Ok(tagged) => (
+                "Memory channel + tag read",
+                Ok(format!(
+                    "CH{:03}: {} Hz {} \"{}\"",
+                    tagged.entry.channel,
+                    tagged.entry.frequency_hz,
+                    tagged.entry.mode.name(),
+                    tagged.tag.as_str()
+                )),
+            ),
+            Err(e) => ("Read memory channel + tag", Err(e)),
+        },
+        ExecuteAction::WriteMemoryChannelTagFromVfoA(ch, tag_str) => {
+            match (radio.get_vfo_a().await, radio.get_mode().await) {
+                (Ok(freq), Ok(mode)) => {
+                    let entry = MemoryChannelEntry {
+                        channel: ch,
+                        frequency_hz: freq.hz(),
+                        clarifier_offset_hz: 0,
+                        rx_clarifier_on: false,
+                        tx_clarifier_on: false,
+                        mode,
+                        tone_status: 0,
+                        offset_type: 0,
+                    };
+                    match MemoryTag::new(&tag_str) {
+                        Ok(tag) => (
+                            "Memory channel + tag written from VFO A",
+                            ok_unit(
+                                radio
+                                    .write_memory_channel_tag(TaggedMemoryChannel { entry, tag })
+                                    .await,
+                            ),
+                        ),
+                        Err(e) => ("Memory channel + tag written from VFO A", Err(e)),
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => ("Memory channel + tag written from VFO A", Err(e)),
+            }
+        }
+
+        // --- Group 4 (ClarifierToneIfShift) ---
+        ExecuteAction::SetRxClarifierOn(on) => (
+            "RX clarifier set",
+            ok_unit(radio.set_rx_clarifier_on(on).await),
+        ),
+        ExecuteAction::SetTxClarifierOn(on) => (
+            "TX clarifier set",
+            ok_unit(radio.set_tx_clarifier_on(on).await),
+        ),
+        ExecuteAction::ClarifierClear => {
+            ("Clarifier cleared", ok_unit(radio.clarifier_clear().await))
+        }
+        ExecuteAction::ClarifierDown(hz) => (
+            "Clarifier down set",
+            ok_unit(radio.clarifier_down(hz).await),
+        ),
+        ExecuteAction::ClarifierUp(hz) => {
+            ("Clarifier up set", ok_unit(radio.clarifier_up(hz).await))
+        }
+        ExecuteAction::SetIfShift(hz) => ("IF shift set", ok_unit(radio.set_if_shift_hz(hz).await)),
+        ExecuteAction::SetToneSquelchMode(mode) => (
+            "Tone squelch mode set",
+            ok_unit(radio.set_tone_squelch_mode(mode).await),
+        ),
+        ExecuteAction::SetCtcssTone(hz) => {
+            ("CTCSS tone set", ok_unit(radio.set_ctcss_tone_hz(hz).await))
+        }
+        ExecuteAction::SetDcsCode(code) => {
+            ("DCS code set", ok_unit(radio.set_dcs_code(code).await))
+        }
+
+        // --- Group 6 (ScanVoxBusy) ---
+        ExecuteAction::SetScanState(state) => {
+            ("Scan state set", ok_unit(radio.set_scan_state(state).await))
+        }
+        ExecuteAction::SetVoxOn(on) => ("VOX set", ok_unit(radio.set_vox_on(on).await)),
+        ExecuteAction::SetVoxGain(v) => ("VOX gain set", ok_unit(radio.set_vox_gain(v).await)),
+        ExecuteAction::SetVoxDelay(ms) => ("VOX delay set", ok_unit(radio.set_vox_delay(ms).await)),
+
+        // --- Group 5 (KeyerCwBreakIn) ---
+        //
+        // `ToggleRts` is sync (`CwKeying::assert_rts` is a plain `&self`
+        // fn, no `.await` — §10.3/§11.3), and is the only arm in this match
+        // that mutates `display` — see this function's own doc comment.
+        ExecuteAction::ToggleRts(prev_asserted) => {
+            let new_asserted = !prev_asserted;
+            display.rts_asserted = new_asserted; // optimistic set
+            match radio.assert_rts(new_asserted) {
+                Ok(()) => ("RTS CW key toggled", Ok(String::new())),
+                Err(e) => {
+                    display.rts_asserted = prev_asserted; // roll back
+                    ("RTS CW key toggled", Err(e))
+                }
+            }
+        }
+        ExecuteAction::SetBreakInOn(on) => {
+            ("Break-in set", ok_unit(radio.set_break_in_on(on).await))
+        }
+        ExecuteAction::SetSemiBreakInDelay(ms) => (
+            "Semi break-in delay set",
+            ok_unit(radio.set_semi_break_in_delay(ms).await),
+        ),
+        ExecuteAction::SetCwSpotOn(on) => ("CW spot set", ok_unit(radio.set_cw_spot_on(on).await)),
+        ExecuteAction::SetKeyerEnabled(on) => (
+            "Electronic keyer set",
+            ok_unit(radio.set_keyer_enabled(on).await),
+        ),
+        ExecuteAction::SetKeyerSpeed(wpm) => {
+            ("Keyer speed set", ok_unit(radio.set_keyer_speed(wpm).await))
+        }
+        ExecuteAction::SetKeyerPitchHz(hz) => (
+            "Keyer pitch set",
+            ok_unit(radio.set_keyer_pitch_hz(hz).await),
+        ),
+        ExecuteAction::ZeroIn => ("CW zero-in triggered", ok_unit(radio.zero_in().await)),
+        ExecuteAction::ReadKeyerMemory(ch) => match radio.read_keyer_memory(ch).await {
+            Ok(msg) => ("Keyer memory read", Ok(format!("CH{ch}: \"{msg}\""))),
+            Err(e) => ("Read keyer memory", Err(e)),
+        },
+        ExecuteAction::WriteKeyerMemory(ch, msg) => (
+            "Keyer memory written",
+            ok_unit(radio.write_keyer_memory(ch, &msg).await),
+        ),
+        ExecuteAction::PlayKeyerMemory(ch) => (
+            "Keyer memory playback triggered",
+            ok_unit(
+                radio
+                    .play_keyer_memory(ch, radio::KeyerPlaybackMode::KeyerMemory)
+                    .await,
+            ),
+        ),
+        ExecuteAction::PlayMessageKeyer(ch) => (
+            "Message keyer playback triggered",
+            ok_unit(
+                radio
+                    .play_keyer_memory(ch, radio::KeyerPlaybackMode::MessageKeyer)
+                    .await,
+            ),
+        ),
+
+        // --- Group 2 (VfoMemoryQuickOps) — all 11 are zero-argument
+        // write-only wire triggers, same `ok_unit` shape as ClarifierClear/
+        // ZeroIn above. ---
+        ExecuteAction::CopyVfoAToB => ("VFO A copied to B", ok_unit(radio.copy_vfo_a_to_b().await)),
+        ExecuteAction::CopyVfoBToA => ("VFO B copied to A", ok_unit(radio.copy_vfo_b_to_a().await)),
+        ExecuteAction::SwapVfos => ("VFOs swapped", ok_unit(radio.swap_vfos().await)),
+        ExecuteAction::StoreVfoToMemory => (
+            "VFO A stored to memory",
+            ok_unit(radio.store_vfo_to_memory().await),
+        ),
+        ExecuteAction::RecallMemoryToVfo => (
+            "Memory recalled to VFO A",
+            ok_unit(radio.recall_memory_to_vfo().await),
+        ),
+        ExecuteAction::MemoryChannelUp => (
+            "Memory channel stepped up",
+            ok_unit(radio.memory_channel_up().await),
+        ),
+        ExecuteAction::MemoryChannelDown => (
+            "Memory channel stepped down",
+            ok_unit(radio.memory_channel_down().await),
+        ),
+        ExecuteAction::ToggleVfoMemoryMode => (
+            "VFO/Memory mode toggled",
+            ok_unit(radio.toggle_vfo_memory_mode().await),
+        ),
+        ExecuteAction::QmbStore => ("QMB stored", ok_unit(radio.qmb_store().await)),
+        ExecuteAction::QmbRecall => ("QMB recalled", ok_unit(radio.qmb_recall().await)),
+        ExecuteAction::QuickSplit => ("Quick split toggled", ok_unit(radio.quick_split().await)),
+
+        // --- Group 9 (BandStepEncoder) ---
+        ExecuteAction::SetBand(band) => ("Band selected", ok_unit(radio.set_band(band).await)),
+        ExecuteAction::BandUp => ("Band stepped up", ok_unit(radio.band_up().await)),
+        ExecuteAction::BandDown => ("Band stepped down", ok_unit(radio.band_down().await)),
+        ExecuteAction::SetFineStep(on) => ("Fine step set", ok_unit(radio.set_fine_step(on).await)),
+        ExecuteAction::MicUp => ("Mic UP pressed", ok_unit(radio.mic_up().await)),
+        ExecuteAction::MicDown => ("Mic DOWN pressed", ok_unit(radio.mic_down().await)),
+        // `ED`/`EU`/`EK` — real wire triggers, honestly disclosed as
+        // context-dependent/no-persisted-state in
+        // `control.rs::band_step_encoder_commands`'s doc comment.
+        ExecuteAction::EncoderDown(encoder, steps) => (
+            "Encoder nudged down",
+            ok_unit(radio.encoder_down(encoder, steps).await),
+        ),
+        ExecuteAction::EncoderUp(encoder, steps) => (
+            "Encoder nudged up",
+            ok_unit(radio.encoder_up(encoder, steps).await),
+        ),
+        ExecuteAction::EntKey => ("ENT key pressed", ok_unit(radio.ent_key().await)),
+
+        // --- Group 7 (AttenuatorNoiseAgcNotchFilter) — plain 1:1
+        // `Radio`/`Ft991aExtras` passthroughs, same shape as every other
+        // arm in this match; no executor-side branching logic, so (per
+        // Wave 4 Task 3/5's established division of test coverage) no new
+        // `terminal.rs` tests are needed for these — see
+        // `control.rs::attenuator_noise_agc_notch_filter_commands`'s doc
+        // comment for the full trait-mix citation. ---
+        ExecuteAction::SetAttenuatorOn(on) => {
+            ("Attenuator set", ok_unit(radio.set_attenuator_on(on).await))
+        }
+        ExecuteAction::SetPreampMode(mode) => (
+            "Pre-amp mode set",
+            ok_unit(radio.set_preamp_mode(mode).await),
+        ),
+        ExecuteAction::SetNoiseBlankerOn(on) => (
+            "Noise blanker set",
+            ok_unit(radio.set_noise_blanker_on(on).await),
+        ),
+        ExecuteAction::SetNoiseBlankerLevel(level) => (
+            "Noise blanker level set",
+            ok_unit(radio.set_noise_blanker_level(level).await),
+        ),
+        ExecuteAction::SetNoiseReductionOn(on) => (
+            "Noise reduction set",
+            ok_unit(radio.set_noise_reduction_on(on).await),
+        ),
+        ExecuteAction::SetNoiseReductionLevel(level) => (
+            "Noise reduction level set",
+            ok_unit(radio.set_noise_reduction_level(level).await),
+        ),
+        ExecuteAction::SetAgcMode(mode) => {
+            ("AGC mode set", ok_unit(radio.set_agc_mode(mode).await))
+        }
+        ExecuteAction::SetAutoNotchOn(on) => {
+            ("Auto notch set", ok_unit(radio.set_auto_notch_on(on).await))
+        }
+        ExecuteAction::SetNarrowOn(on) => {
+            ("Narrow filter set", ok_unit(radio.set_narrow_on(on).await))
+        }
+        ExecuteAction::SetFilterWidthIndex(index) => (
+            "Filter width set",
+            ok_unit(radio.set_filter_width_index(index).await),
+        ),
+        ExecuteAction::SetContourOn(on) => ("Contour set", ok_unit(radio.set_contour_on(on).await)),
+        ExecuteAction::SetContourFrequencyHz(hz) => (
+            "Contour frequency set",
+            ok_unit(radio.set_contour_frequency_hz(hz).await),
+        ),
+        ExecuteAction::SetApfOn(on) => ("APF set", ok_unit(radio.set_apf_on(on).await)),
+        ExecuteAction::SetApfFrequencyHz(hz) => (
+            "APF frequency set",
+            ok_unit(radio.set_apf_frequency_hz(hz).await),
+        ),
+        ExecuteAction::SetManualNotchOn(on) => (
+            "Manual notch set",
+            ok_unit(radio.set_manual_notch_on(on).await),
+        ),
+        ExecuteAction::SetManualNotchFrequencyHz(hz) => (
+            "Manual notch frequency set",
+            ok_unit(radio.set_manual_notch_frequency_hz(hz).await),
+        ),
+
+        // --- Group 8 (SpeechMicMonitor) — same plain-passthrough shape. ---
+        ExecuteAction::SetMicGain(level) => {
+            ("Mic gain set", ok_unit(radio.set_mic_gain(level).await))
+        }
+        ExecuteAction::SetSpeechProcessorLevel(level) => (
+            "Speech processor level set",
+            ok_unit(radio.set_speech_processor_level(level).await),
+        ),
+        ExecuteAction::SetSpeechProcessorOn(on) => (
+            "Speech processor set",
+            ok_unit(radio.set_speech_processor_on(on).await),
+        ),
+        ExecuteAction::SetMonitorOn(on) => ("Monitor set", ok_unit(radio.set_monitor_on(on).await)),
+        ExecuteAction::SetMonitorLevel(level) => (
+            "Monitor level set",
+            ok_unit(radio.set_monitor_level(level).await),
+        ),
+        ExecuteAction::SetParametricMicEqOn(on) => (
+            "Parametric mic EQ set",
+            ok_unit(radio.set_parametric_mic_eq_on(on).await),
+        ),
+
+        // --- Group 10 (MetersStatus) — plain 1:1 `Radio`/`Ft991aExtras`
+        // passthroughs, same shape as every other arm in this match; no
+        // executor-side branching logic, so (per Wave 4 Task 3/5/6's
+        // established division of test coverage) no new `terminal.rs`
+        // tests are needed for these — see
+        // `control.rs::meters_status_commands`'s doc comment for the full
+        // trait-mix citation. ---
+        ExecuteAction::SelectMeter(meter) => {
+            ("Meter selected", ok_unit(radio.select_meter(meter).await))
+        }
+        ExecuteAction::GetSelectedMeter => match radio.get_selected_meter().await {
+            Ok(m) => (
+                "Selected meter read",
+                Ok(format!("Selected meter: {}", m.name())),
+            ),
+            Err(e) => ("Get selected meter", Err(e)),
+        },
+        ExecuteAction::ReadMeterDirect(meter) => match radio.get_meter(meter).await {
+            Ok(v) => ("Meter read", Ok(format!("{}: {}", meter.name(), v))),
+            Err(e) => ("Read meter", Err(e)),
+        },
+        ExecuteAction::GetActiveMeterReading => match radio.get_active_meter_reading().await {
+            Ok(v) => ("Active meter read", Ok(format!("Active meter: {v}"))),
+            Err(e) => ("Read active meter", Err(e)),
+        },
+        ExecuteAction::GetInformation => {
+            match radio.get_information().await {
+                Ok(info) => (
+                    "Status (IF) read",
+                    Ok(format!(
+                    "CH{:03} {} Hz mode {:X}h clar {}{} Hz RXclr:{} TXclr:{} sel:{} tone:{} off:{}",
+                    info.channel,
+                    info.frequency_hz,
+                    info.mode,
+                    if info.clarifier_offset_hz < 0 { "-" } else { "+" },
+                    info.clarifier_offset_hz.unsigned_abs(),
+                    info.rx_clarifier_on,
+                    info.tx_clarifier_on,
+                    info.select,
+                    info.tone_status,
+                    info.offset_type
+                )),
+                ),
+                Err(e) => ("Read status (IF)", Err(e)),
+            }
+        }
+        ExecuteAction::GetRadioIndicator(indicator) => {
+            match radio.get_radio_indicator(indicator).await {
+                Ok(b) => (
+                    "Radio indicator read",
+                    Ok(format!(
+                        "{}: {}",
+                        indicator.name(),
+                        if b { "ON" } else { "OFF" }
+                    )),
+                ),
+                Err(e) => ("Read radio indicator", Err(e)),
+            }
+        }
+        ExecuteAction::GetMenuModeActive => match radio.get_menu_mode_active().await {
+            Ok(b) => (
+                "Menu mode status read",
+                Ok(format!(
+                    "Menu mode: {}",
+                    if b { "ACTIVE" } else { "NORMAL" }
+                )),
+            ),
+            Err(e) => ("Read menu mode status", Err(e)),
+        },
+        ExecuteAction::GetPllUnlocked => match radio.get_pll_unlocked().await {
+            Ok(b) => (
+                "PLL status read",
+                Ok(format!("PLL: {}", if b { "UNLOCKED" } else { "LOCKED" })),
+            ),
+            Err(e) => ("Read PLL status", Err(e)),
+        },
+
+        // --- Group 11 (SystemTunerDvs) — same plain-passthrough shape. ---
+        ExecuteAction::SetAutoInfoOn(on) => {
+            ("Auto-info set", ok_unit(radio.set_auto_info_on(on).await))
+        }
+        ExecuteAction::SetFrequencyLock(on) => (
+            "Frequency lock set",
+            ok_unit(radio.set_frequency_lock(on).await),
+        ),
+        ExecuteAction::SetRepeaterShift(shift) => (
+            "Repeater shift set",
+            ok_unit(radio.set_repeater_shift(shift).await),
+        ),
+        ExecuteAction::SetTxVfo(vfo) => ("TX VFO set", ok_unit(radio.set_tx_vfo(vfo).await)),
+        ExecuteAction::SetMoxOn(on) => ("MOX set", ok_unit(radio.set_mox_on(on).await)),
+        ExecuteAction::SetAntennaTunerState(state) => (
+            "Antenna tuner state set",
+            ok_unit(radio.set_antenna_tuner_state(state).await),
+        ),
+        ExecuteAction::SetDimmer(led, tft) => {
+            ("Dimmer set", ok_unit(radio.set_dimmer(led, tft).await))
+        }
+        ExecuteAction::GetDimmer => match radio.get_dimmer().await {
+            Ok((led, tft)) => ("Dimmer read", Ok(format!("LED {led} TFT {tft}"))),
+            Err(e) => ("Read dimmer", Err(e)),
+        },
+        ExecuteAction::SetDate(year, month, day) => (
+            "Date set",
+            ok_unit(radio.write_date(year, month, day).await),
+        ),
+        ExecuteAction::ReadDate => match radio.read_date().await {
+            Ok((y, m, d)) => ("Date read", Ok(format!("{y:04}-{m:02}-{d:02}"))),
+            Err(e) => ("Read date", Err(e)),
+        },
+        ExecuteAction::SetTime(hour, minute, second) => (
+            "Time set",
+            ok_unit(radio.write_time(hour, minute, second).await),
+        ),
+        ExecuteAction::ReadTime => match radio.read_time().await {
+            Ok((h, mi, se)) => ("Time read", Ok(format!("{h:02}:{mi:02}:{se:02}"))),
+            Err(e) => ("Read time", Err(e)),
+        },
+        ExecuteAction::SetTimeZoneOffset(minutes) => (
+            "Time zone offset set",
+            ok_unit(radio.write_time_zone_offset(minutes).await),
+        ),
+        ExecuteAction::ReadTimeZoneOffset => match radio.read_time_zone_offset().await {
+            Ok(minutes) => {
+                let sign = if minutes < 0 { '-' } else { '+' };
+                let mag = minutes.unsigned_abs();
+                (
+                    "Time zone offset read",
+                    Ok(format!("{sign}{:02}{:02}", mag / 60, mag % 60)),
+                )
+            }
+            Err(e) => ("Read time zone offset", Err(e)),
+        },
+        ExecuteAction::GetOppositeBandInformation => {
+            match radio.get_opposite_band_information().await {
+                Ok(info) => (
+                    "Opposite-band status read",
+                    Ok(format!(
+                        "VFO-B CH{:03} {} Hz mode {:X}h",
+                        info.channel, info.frequency_hz, info.mode
+                    )),
+                ),
+                Err(e) => ("Read opposite-band status", Err(e)),
+            }
+        }
+        ExecuteAction::SetTxwOn(on) => ("TXW set", ok_unit(radio.set_txw_on(on).await)),
+        ExecuteAction::StartDvsRecording(ch) => (
+            "DVS recording started",
+            ok_unit(radio.start_dvs_recording(ch).await),
+        ),
+        ExecuteAction::StopDvsRecording => (
+            "DVS recording stopped",
+            ok_unit(radio.stop_dvs_recording().await),
+        ),
+        ExecuteAction::GetDvsRecordingChannel => match radio.get_dvs_recording_channel().await {
+            Ok(Some(ch)) => ("DVS recording status read", Ok(format!("Recording CH{ch}"))),
+            Ok(None) => ("DVS recording status read", Ok("Not recording".to_string())),
+            Err(e) => ("Read DVS recording status", Err(e)),
+        },
+        ExecuteAction::StartDvsPlayback(ch) => (
+            "DVS playback started",
+            ok_unit(radio.start_dvs_playback(ch).await),
+        ),
+        ExecuteAction::StopDvsPlayback => (
+            "DVS playback stopped",
+            ok_unit(radio.stop_dvs_playback().await),
+        ),
+        ExecuteAction::GetDvsPlaybackChannel => match radio.get_dvs_playback_channel().await {
+            Ok(Some(ch)) => ("DVS playback status read", Ok(format!("Playing CH{ch}"))),
+            Ok(None) => ("DVS playback status read", Ok("Not playing".to_string())),
+            Err(e) => ("Read DVS playback status", Err(e)),
+        },
+
+        // --- Group 12 (`ExMenu`), path (b): number-entry escape hatch
+        // (§11.4). New `Ft991aExtras` method (Wave 4 Task 1) — no existing
+        // inherent method being re-exposed, unlike almost every other arm
+        // above.
+        ExecuteAction::SetExMenuItem(p1, value) => (
+            "EX menu item set",
+            ok_unit(radio.set_ex_menu_item(p1, value).await),
+        ),
     }
 }
 
@@ -220,14 +765,24 @@ async fn execute_action<R: Radio>(
 /// ts570d's two-task/channel architecture): every iteration, poll the
 /// radio if `POLL_INTERVAL` has elapsed, redraw, then wait up to
 /// `EVENT_POLL_TIMEOUT` for a key event and handle it inline.
-pub async fn run<R: Radio + 'static>(mut radio: R) -> UiResult<()> {
+///
+/// **Bound widened in Wave 4 Task 2** (`planning/architect/task_plan.md`
+/// §11.3 point 3) from `R: Radio + 'static` to `R: Radio + Ft991aExtras +
+/// CwKeying + 'static` — a disclosed, real narrowing of this crate's scope:
+/// `ui` is no longer usable against "any `Radio` implementation" in the
+/// abstract, only against types that also implement the FT-991A-specific
+/// `Ft991aExtras`/`CwKeying` traits (see `crate` module docs). Costs nothing
+/// against this repo's only concrete wiring today
+/// (`Ft991a<SerialCatSession<SerialPort>>`, `src/main.rs`), which already
+/// satisfies all three bounds unconditionally.
+pub async fn run<R: Radio + Ft991aExtras + CwKeying + 'static>(mut radio: R) -> UiResult<()> {
     let mut terminal = init_terminal()?;
     let result = run_loop(&mut terminal, &mut radio).await;
     cleanup_terminal()?;
     result
 }
 
-async fn run_loop<R: Radio>(
+async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     radio: &mut R,
 ) -> UiResult<()> {
@@ -273,10 +828,19 @@ async fn run_loop<R: Radio>(
                     KeyResult::Quit => break,
                     KeyResult::Continue => {}
                     KeyResult::Execute(action) => {
-                        let (desc, result) = execute_action(radio, action).await;
+                        let (desc, result) = execute_action(radio, action, &mut display).await;
                         control = match result {
-                            Ok(()) => ControlState::Feedback {
+                            // Empty extra text -> plain "OK: {desc}"; the
+                            // read-type actions (§ execute_action doc
+                            // comment) return their fetched value here
+                            // instead, which takes priority when present —
+                            // mirrors `ts570d::ui`'s own convention.
+                            Ok(msg) if msg.is_empty() => ControlState::Feedback {
                                 message: format!("OK: {}", desc),
+                                is_error: false,
+                            },
+                            Ok(msg) => ControlState::Feedback {
+                                message: msg,
                                 is_error: false,
                             },
                             Err(e) => ControlState::Feedback {
@@ -331,6 +895,12 @@ mod tests {
     struct MockRadio {
         vfo_a: RadioResult<Frequency>,
         fail_all: bool,
+        /// Records every `set_ex_menu_item(p1, value)` call, in order — Wave
+        /// 4 Task 8's round-trip test verifies against this, the same
+        /// "record what was called" shape a `fail_all`-gated stub can't
+        /// express on its own (unlike the plain-boolean-result methods
+        /// above, the test needs the *arguments*, not just success/failure).
+        ex_menu_calls: Vec<(u16, i32)>,
     }
 
     impl MockRadio {
@@ -338,6 +908,7 @@ mod tests {
             Self {
                 vfo_a: Frequency::new(14_250_000),
                 fail_all: false,
+                ex_menu_calls: Vec::new(),
             }
         }
 
@@ -345,6 +916,7 @@ mod tests {
             Self {
                 vfo_a: Err(radio::RadioError::NotImplemented),
                 fail_all: true,
+                ex_menu_calls: Vec::new(),
             }
         }
     }
@@ -435,6 +1007,45 @@ mod tests {
         }
     }
 
+    // Wave 4 Task 2 (§11.3 point 3's last bullet): `run`'s bound widened to
+    // require `Ft991aExtras`/`CwKeying` too, so every in-crate `MockRadio`
+    // test double needs these — inheriting the traits' own `NotImplemented`
+    // default bodies, exactly like `radio::NopRadio` does.
+    #[async_trait(?Send)]
+    impl Ft991aExtras for MockRadio {
+        // Wave 4 Task 8 (§11.4, path (b)): overridden (not left at its
+        // `NotImplemented` default) so the round-trip test can verify both
+        // that `execute_action` reaches this call at all, and with exactly
+        // the arguments the state machine produced — mirrors `CwKeying`'s
+        // `assert_rts` override below (Wave 4 Task 4), the established
+        // precedent for testing a *new* (not re-exposed) `Ft991aExtras`
+        // capability this way.
+        async fn set_ex_menu_item(&mut self, p1: u16, value: i32) -> RadioResult<()> {
+            if self.fail_all {
+                return Err(RadioError::NotImplemented);
+            }
+            self.ex_menu_calls.push((p1, value));
+            Ok(())
+        }
+    }
+
+    // Wave 4 Task 4 (§11.3 point 6): `assert_rts` is overridden (not left
+    // at its `NotImplemented` default) so both the optimistic-set and
+    // rollback-on-error paths of `execute_action`'s `ToggleRts` arm are
+    // exercisable — `MockRadio::ok()`'s `fail_all: false` succeeds,
+    // `MockRadio::failing()`'s `fail_all: true` fails, mirroring how every
+    // other overridden `Radio` method above already branches on the same
+    // flag.
+    impl CwKeying for MockRadio {
+        fn assert_rts(&self, _asserted: bool) -> RadioResult<()> {
+            if self.fail_all {
+                Err(RadioError::NotImplemented)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     #[monoio::test(driver = "legacy")]
     async fn test_poll_radio_state_success_populates_all_fields() {
         let mut radio = MockRadio::ok();
@@ -464,7 +1075,9 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_execute_action_set_vfo_a() {
         let mut radio = MockRadio::ok();
-        let (desc, result) = execute_action(&mut radio, ExecuteAction::SetVfoA(14_300_000)).await;
+        let mut display = Ft991aDisplay::default();
+        let (desc, result) =
+            execute_action(&mut radio, ExecuteAction::SetVfoA(14_300_000), &mut display).await;
         assert_eq!(desc, "VFO A set");
         assert!(result.is_ok());
     }
@@ -472,16 +1085,26 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_execute_action_set_vfo_a_rejects_out_of_range() {
         let mut radio = MockRadio::ok();
-        let (_desc, result) =
-            execute_action(&mut radio, ExecuteAction::SetVfoA(Frequency::MAX_HZ + 1)).await;
+        let mut display = Ft991aDisplay::default();
+        let (_desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::SetVfoA(Frequency::MAX_HZ + 1),
+            &mut display,
+        )
+        .await;
         assert!(result.is_err());
     }
 
     #[monoio::test(driver = "legacy")]
     async fn test_execute_action_toggle_tx_from_cat_keyed_sends_receive() {
         let mut radio = MockRadio::ok();
-        let (desc, result) =
-            execute_action(&mut radio, ExecuteAction::ToggleTx(TxState::CatKeyed)).await;
+        let mut display = Ft991aDisplay::default();
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ToggleTx(TxState::CatKeyed),
+            &mut display,
+        )
+        .await;
         assert_eq!(desc, "RX (CAT)");
         assert!(result.is_ok());
     }
@@ -489,8 +1112,13 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_execute_action_toggle_tx_from_off_sends_transmit() {
         let mut radio = MockRadio::ok();
-        let (desc, result) =
-            execute_action(&mut radio, ExecuteAction::ToggleTx(TxState::Off)).await;
+        let mut display = Ft991aDisplay::default();
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ToggleTx(TxState::Off),
+            &mut display,
+        )
+        .await;
         assert_eq!(desc, "TX (CAT)");
         assert!(result.is_ok());
     }
@@ -502,9 +1130,11 @@ mod tests {
         // it does not attempt to clear the non-CAT source, since the
         // manual documents no command that would.
         let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
         let (desc, result) = execute_action(
             &mut radio,
             ExecuteAction::ToggleTx(TxState::RadioKeyedNonCat),
+            &mut display,
         )
         .await;
         assert_eq!(desc, "TX (CAT)");
@@ -514,8 +1144,235 @@ mod tests {
     #[monoio::test(driver = "legacy")]
     async fn test_execute_action_toggle_power_on_flips_state() {
         let mut radio = MockRadio::ok();
-        let (desc, result) = execute_action(&mut radio, ExecuteAction::TogglePowerOn(true)).await;
+        let mut display = Ft991aDisplay::default();
+        let (desc, result) =
+            execute_action(&mut radio, ExecuteAction::TogglePowerOn(true), &mut display).await;
         assert_eq!(desc, "Power toggled");
         assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // Group 5 (KeyerCwBreakIn) — RTS CW-keying toggle (§11.3 point 6): the
+    // optimistic-set and rollback-on-error paths.
+    // =========================================================================
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_toggle_rts_success_sets_display_optimistically() {
+        let mut radio = MockRadio::ok(); // fail_all: false -> assert_rts succeeds
+        let mut display = Ft991aDisplay::default();
+        assert!(!display.rts_asserted);
+
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ToggleRts(false), // carried "currently not asserted"
+            &mut display,
+        )
+        .await;
+
+        assert_eq!(desc, "RTS CW key toggled");
+        assert!(result.is_ok());
+        assert!(
+            display.rts_asserted,
+            "successful assert_rts must leave the optimistic set in place"
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_toggle_rts_rollback_on_error() {
+        let mut radio = MockRadio::failing(); // fail_all: true -> assert_rts errors
+        let mut display = Ft991aDisplay::default();
+        assert!(!display.rts_asserted);
+
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ToggleRts(false), // carried "currently not asserted"
+            &mut display,
+        )
+        .await;
+
+        assert_eq!(desc, "RTS CW key toggled");
+        assert!(result.is_err());
+        assert!(
+            !display.rts_asserted,
+            "a failed assert_rts must roll the optimistic set back to its prior value"
+        );
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_toggle_rts_from_asserted_true_rolls_back_to_true_on_error() {
+        // Same rollback path, but starting from `rts_asserted == true` (the
+        // "turn it back off" direction) — confirms rollback restores the
+        // *carried* prior value, not just `false`.
+        let mut radio = MockRadio::failing();
+        let mut display = Ft991aDisplay {
+            rts_asserted: true,
+            ..Ft991aDisplay::default()
+        };
+
+        let (_desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ToggleRts(true), // carried "currently asserted"
+            &mut display,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            display.rts_asserted,
+            "rollback must restore the carried prior value (true), not default to false"
+        );
+    }
+
+    // --- Group 12 (`ExMenu`), path (b): number-entry escape hatch (§11.4,
+    // Wave 4 Task 8) ---
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_set_ex_menu_item_dispatches_to_radio() {
+        let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::SetExMenuItem(60, 2),
+            &mut display,
+        )
+        .await;
+        assert_eq!(desc, "EX menu item set");
+        assert!(result.is_ok());
+        assert_eq!(radio.ex_menu_calls, vec![(60, 2)]);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_set_ex_menu_item_propagates_error() {
+        let mut radio = MockRadio::failing();
+        let mut display = Ft991aDisplay::default();
+        let (_desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::SetExMenuItem(60, 2),
+            &mut display,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(radio.ex_menu_calls.is_empty());
+    }
+
+    /// Full round trip through the state machine (`control::handle_key`)
+    /// and into the radio (`execute_action`) for an
+    /// [`radio::ft991a_radio::ExMenuValueKind::Enumerated`] item: `[N]` ->
+    /// type "060" -> `Enter` (looks up item 060 "PC KEYING", forks to
+    /// `ListSelect` with labels `OFF`/`DAKY`/`RTS`/`DTR`) -> move the cursor
+    /// to `RTS` -> `Enter` (confirm) -> `execute_action` -> verify
+    /// `MockRadio::set_ex_menu_item` was called with `(60, 2)` (wire `"2"` =
+    /// `RTS`, per `radio/src/ft991a_radio.rs`'s `EX_MENU_TABLE` row for
+    /// P1=60).
+    #[monoio::test(driver = "legacy")]
+    async fn test_ex_menu_number_entry_round_trip_enumerated() {
+        use crate::control::SelectAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        fn key(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::NONE)
+        }
+
+        let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
+        let mut control = ControlState::Menu;
+
+        assert_eq!(
+            handle_key(key(KeyCode::Char('N')), &mut control, &display),
+            KeyResult::Continue
+        );
+        assert!(matches!(control, ControlState::ExNumberEntry { .. }));
+
+        assert_eq!(
+            handle_key(key(KeyCode::Char('6')), &mut control, &display),
+            KeyResult::Continue
+        );
+        assert_eq!(
+            handle_key(key(KeyCode::Char('0')), &mut control, &display),
+            KeyResult::Continue
+        );
+
+        assert_eq!(
+            handle_key(key(KeyCode::Enter), &mut control, &display),
+            KeyResult::Continue
+        );
+        match &control {
+            ControlState::ListSelect {
+                options, action, ..
+            } => {
+                assert_eq!(*action, SelectAction::SetExMenuItem(60));
+                assert_eq!(
+                    options,
+                    &vec![
+                        "OFF".to_string(),
+                        "DAKY".to_string(),
+                        "RTS".to_string(),
+                        "DTR".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected ListSelect, got {other:?}"),
+        }
+
+        // Move cursor from "OFF" (0) to "RTS" (2).
+        handle_key(key(KeyCode::Right), &mut control, &display);
+        handle_key(key(KeyCode::Right), &mut control, &display);
+
+        let result = handle_key(key(KeyCode::Enter), &mut control, &display);
+        let KeyResult::Execute(action) = result else {
+            panic!("expected KeyResult::Execute, got {result:?}");
+        };
+        assert_eq!(action, ExecuteAction::SetExMenuItem(60, 2));
+
+        let (desc, exec_result) = execute_action(&mut radio, action, &mut display).await;
+        assert_eq!(desc, "EX menu item set");
+        assert!(exec_result.is_ok());
+        assert_eq!(radio.ex_menu_calls, vec![(60, 2)]);
+    }
+
+    /// Same round trip, [`radio::ft991a_radio::ExMenuValueKind::Range`]
+    /// fork: `[N]` -> "001" -> `Enter` (item 001 "AGC FAST DELAY",
+    /// `20..=4000` step `20`, forks to `TextInput`) -> type "100" -> `Enter`
+    /// -> `execute_action` -> verify `(1, 100)`.
+    #[monoio::test(driver = "legacy")]
+    async fn test_ex_menu_number_entry_round_trip_range() {
+        use crate::control::InputAction;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        fn key(code: KeyCode) -> KeyEvent {
+            KeyEvent::new(code, KeyModifiers::NONE)
+        }
+
+        let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
+        let mut control = ControlState::Menu;
+
+        handle_key(key(KeyCode::Char('N')), &mut control, &display);
+        handle_key(key(KeyCode::Char('0')), &mut control, &display);
+        handle_key(key(KeyCode::Char('0')), &mut control, &display);
+        handle_key(key(KeyCode::Char('1')), &mut control, &display);
+        handle_key(key(KeyCode::Enter), &mut control, &display);
+
+        match &control {
+            ControlState::TextInput { action, prompt, .. } => {
+                assert_eq!(*action, InputAction::SetExMenuItem(1));
+                assert!(prompt.contains("20..=4000"), "prompt: {prompt}");
+            }
+            other => panic!("expected TextInput, got {other:?}"),
+        }
+
+        for c in "100".chars() {
+            handle_key(key(KeyCode::Char(c)), &mut control, &display);
+        }
+        let result = handle_key(key(KeyCode::Enter), &mut control, &display);
+        let KeyResult::Execute(action) = result else {
+            panic!("expected KeyResult::Execute, got {result:?}");
+        };
+        assert_eq!(action, ExecuteAction::SetExMenuItem(1, 100));
+
+        let (desc, exec_result) = execute_action(&mut radio, action, &mut display).await;
+        assert_eq!(desc, "EX menu item set");
+        assert!(exec_result.is_ok());
+        assert_eq!(radio.ex_menu_calls, vec![(1, 100)]);
     }
 }

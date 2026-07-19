@@ -19,9 +19,19 @@
 // convention ARE carried over, since those are generic rendering helpers,
 // not TS-570D-specific. See `planning/emulator/task_plan.md` §7.3/Findings
 // for the design rationale and judgment calls below.
+//
+// Wave 4 (`planning/architect/task_plan.md` §11.5): proportional growth of
+// this screen alongside `Ft991aState`'s Wave 3 field growth (11 -> 91
+// commands, first-slice -> full state machine). Per §11.5's explicit shape
+// recommendation, this stays a flat, wider annunciator list (now wrapped
+// across 3 lines instead of 1) rather than becoming a grouped/paginated
+// display — the emulator has no keybindings, so the discoverability
+// pressure that motivated `ui`'s grouped-menu redesign doesn't apply here.
+// See `planning/emulator/task_plan.md`'s Wave 4 section for the full
+// per-region mapping from architect field list -> real `Ft991aState` fields.
 
 use radio::ft991a_radio::Ft991aState as RadioState;
-use radio::{Mode, FT991A_COMMAND_TABLE};
+use radio::{AgcMode, Mode, PreampMode, ScanState, FT991A_COMMAND_TABLE};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -296,9 +306,59 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
     // rows[3] is blank padding — render nothing
 }
 
-/// TX-side meter column: `PWR: <power_control>W` only. No SWR bar — this
-/// first-slice command table has no `RM` meter-read command to back an SWR
-/// reading (unlike ts570d), so no SWR value is fabricated.
+/// Map `MS`'s P1 meter-select value (0-5) to its meter name (manual p.12).
+fn meter_select_label(v: u8) -> &'static str {
+    match v {
+        0 => "COMP",
+        1 => "ALC",
+        2 => "PO",
+        3 => "SWR",
+        4 => "ID",
+        5 => "VDD",
+        _ => "?",
+    }
+}
+
+/// Render one row of the TX-side 6-way meter bank: `LABEL <bar> <value>`.
+/// Highlighted (amber/bold) when `selected` — i.e. this is the meter `MS`
+/// currently has chosen on the front panel; the other five are dimmed but
+/// still shown, since the emulator's job is showing everything at once for
+/// whoever is debugging the wire protocol, not just what a real front panel
+/// would currently display.
+fn draw_meter_row(f: &mut Frame, area: Rect, label: &str, value: u8, selected: bool) {
+    if area.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let value_str = format!("{value:3}");
+    let bar_width = width.saturating_sub(4 + 1 + 1 + value_str.len());
+    let bar_str = bargraph(value as f64 / 255.0, bar_width.max(1));
+    let (text_style, bar_color) = if selected {
+        (
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Color::Yellow,
+        )
+    } else {
+        (Style::default().fg(Color::DarkGray), Color::DarkGray)
+    };
+    let line = Line::from(vec![
+        Span::styled(format!("{label:<4}"), text_style),
+        Span::raw(" "),
+        Span::styled(bar_str, Style::default().fg(bar_color)),
+        Span::raw(" "),
+        Span::styled(value_str, text_style),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// TX-side meter column: `PWR: <power_control>W` plus the full 6-way
+/// `MS`-selected meter bank (COMP/ALC/PO/SWR/ID/VDD, batch 9's `RM`/`MS`).
+/// `PWR` stays a separate row above the bank — it reads `power_control`
+/// (watts, `PC`'s own field) rather than `po_meter` (`RM`'s raw 0-255 PO
+/// reading), a distinct value on a distinct scale, so it is not folded into
+/// the bank as a seventh row.
 fn draw_tx_meter(f: &mut Frame, area: Rect, state: &RadioState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -307,6 +367,13 @@ fn draw_tx_meter(f: &mut Frame, area: Rect, state: &RadioState) {
             Constraint::Length(1), // PWR bargraph
             Constraint::Length(1), // PWR tick labels
             Constraint::Length(1), // blank padding
+            Constraint::Length(1), // 6-way meter bank header (MS-selected)
+            Constraint::Length(1), // COMP
+            Constraint::Length(1), // ALC
+            Constraint::Length(1), // PO
+            Constraint::Length(1), // SWR
+            Constraint::Length(1), // ID
+            Constraint::Length(1), // VDD
             Constraint::Min(0),    // filler
         ])
         .split(area);
@@ -362,6 +429,27 @@ fn draw_tx_meter(f: &mut Frame, area: Rect, state: &RadioState) {
         );
     }
     // rows[3]: blank padding — render nothing
+
+    if rows[4].height > 0 {
+        let header = format!("6-WAY  MS={}", meter_select_label(state.meter_select));
+        f.render_widget(
+            Paragraph::new(Span::styled(header, Style::default().fg(Color::DarkGray))),
+            rows[4],
+        );
+    }
+    draw_meter_row(
+        f,
+        rows[5],
+        "COMP",
+        state.comp_meter,
+        state.meter_select == 0,
+    );
+    draw_meter_row(f, rows[6], "ALC", state.alc_meter, state.meter_select == 1);
+    draw_meter_row(f, rows[7], "PO", state.po_meter, state.meter_select == 2);
+    draw_meter_row(f, rows[8], "SWR", state.swr_meter, state.meter_select == 3);
+    draw_meter_row(f, rows[9], "ID", state.id_meter, state.meter_select == 4);
+    draw_meter_row(f, rows[10], "VDD", state.vdd_meter, state.meter_select == 5);
+    // rows[11]: filler — render nothing
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -372,7 +460,9 @@ fn draw_lcd_main(f: &mut Frame, area: Rect, state: &RadioState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Ann line (active items only, may be empty)
+            Constraint::Length(1), // Ann line 1 (active items only, may be empty)
+            Constraint::Length(1), // Ann line 2 (active items only, may be empty)
+            Constraint::Length(1), // Ann line 3 (active items + always-on AGC label)
             Constraint::Length(1), // Secondary VFO B readout (dim, always shown)
             Constraint::Length(5), // Large frequency display (VFO A, 5-row block glyphs)
             Constraint::Length(1), // Mode row
@@ -380,10 +470,12 @@ fn draw_lcd_main(f: &mut Frame, area: Rect, state: &RadioState) {
         ])
         .split(area);
 
-    draw_ann_line(f, rows[0], state);
-    draw_vfo_b_line(f, rows[1], state);
-    draw_freq_block(f, rows[2], state);
-    draw_mode_row(f, rows[3], state);
+    draw_ann_line1(f, rows[0], state);
+    draw_ann_line2(f, rows[1], state);
+    draw_ann_line3(f, rows[2], state);
+    draw_vfo_b_line(f, rows[3], state);
+    draw_freq_block(f, rows[4], state);
+    draw_mode_row(f, rows[5], state);
 }
 
 /// Build a space-joined string of only the active labels from a list.
@@ -395,19 +487,126 @@ fn active_ann_str(items: &[(&str, bool)]) -> String {
         .join(" ")
 }
 
-/// Annunciator line — reduced to exactly what `Ft991aState` has this slice:
-/// `power_on` and `cat_tx`. No RIT/XIT/split/antenna/AGC/noise-blanker/etc.
-/// annunciators — none of those fields exist on `Ft991aState`.
-fn draw_ann_line(f: &mut Frame, area: Rect, state: &RadioState) {
+/// `PA`'s pre-amp/IPO annunciator — `None` when `Ipo` (bypass; a real front
+/// panel lights neither `AMP1` nor `AMP2` in that state, so nothing is
+/// shown, same "off means hidden" idiom as the plain-bool annunciators).
+fn preamp_ann_label(raw: u8) -> Option<&'static str> {
+    match PreampMode::try_from(raw) {
+        Ok(PreampMode::Amp1) => Some("AMP1"),
+        Ok(PreampMode::Amp2) => Some("AMP2"),
+        _ => None,
+    }
+}
+
+/// `SC`'s scan-direction annunciator — `None` when scan is off.
+fn scan_ann_label(raw: u8) -> Option<&'static str> {
+    match ScanState::try_from(raw) {
+        Ok(ScanState::Up) => Some("SCAN\u{25b2}"),
+        Ok(ScanState::Down) => Some("SCAN\u{25bc}"),
+        _ => None,
+    }
+}
+
+/// `GT`'s AGC-mode label (manual p.10; see the module docs' "GT, AGC's
+/// write/report domain mismatch" section for the 7-valued `P3` domain this
+/// reads). Unlike the other annunciators here, AGC always has *some* active
+/// setting (`OFF` is itself a real, meaningful state to show on a debugging
+/// screen) — so line 3 always shows this label rather than hiding it when
+/// "off", the same always-visible idiom `draw_mode_row` already uses for
+/// the operating mode.
+fn agc_mode_label(raw: u8) -> &'static str {
+    match AgcMode::try_from(raw) {
+        Ok(AgcMode::Off) => "OFF",
+        Ok(AgcMode::Fast) => "FAST",
+        Ok(AgcMode::Mid) => "MID",
+        Ok(AgcMode::Slow) => "SLOW",
+        Ok(AgcMode::AutoFast) => "AUTO-F",
+        Ok(AgcMode::AutoMid) => "AUTO-M",
+        Ok(AgcMode::AutoSlow) => "AUTO-S",
+        Err(_) => "?",
+    }
+}
+
+/// Annunciator line 1 — core operating state: `power_on`/`cat_tx` (as
+/// before), plus `mox_on`/`lock_on`/`menu_mode`/`pll_unlocked` (`IF`/`RS`/
+/// `UL`, batch 9/10).
+fn draw_ann_line1(f: &mut Frame, area: Rect, state: &RadioState) {
     let items: &[(&str, bool)] = &[
         ("PWR", state.power_on),
         ("TX", state.cat_tx == 1),
         ("RX", state.cat_tx == 0),
+        ("MOX", state.mox_on),
+        ("LOCK", state.lock_on),
+        ("MENU", state.menu_mode),
+        ("PLL-UNLK", state.pll_unlocked),
     ];
     let text = active_ann_str(items);
     if !text.is_empty() {
         f.render_widget(Paragraph::new(Span::styled(text, on_style())), area);
     }
+}
+
+/// Annunciator line 2 — front-end/audio processing toggles: clarifier
+/// RX/TX-on (`IF`'s P4/P5, written by `RT`/`XT`), attenuator (`RA`), preamp
+/// (`PA`), noise blanker/reduction (`NB`/`NR`), auto notch (`BC`), narrow
+/// (`NA`).
+fn draw_ann_line2(f: &mut Frame, area: Rect, state: &RadioState) {
+    let mut labels: Vec<&str> = Vec::new();
+    if state.rx_clarifier_on {
+        labels.push("CLAR-R");
+    }
+    if state.tx_clarifier_on {
+        labels.push("CLAR-T");
+    }
+    if state.attenuator_on {
+        labels.push("ATT");
+    }
+    if let Some(l) = preamp_ann_label(state.preamp_mode) {
+        labels.push(l);
+    }
+    if state.noise_blanker_on {
+        labels.push("NB");
+    }
+    if state.noise_reduction_on {
+        labels.push("NR");
+    }
+    if state.auto_notch_on {
+        labels.push("NOTCH");
+    }
+    if state.narrow_on {
+        labels.push("NAR");
+    }
+    let text = labels.join(" ");
+    if !text.is_empty() {
+        f.render_widget(Paragraph::new(Span::styled(text, on_style())), area);
+    }
+}
+
+/// Annunciator line 3 — keying/scan/AGC: keyer enabled (`KR`), scan
+/// direction (`SC`), VOX on (`VX`), break-in on (`BI`), plus the always-on
+/// AGC mode label (`GT`, see [`agc_mode_label`]'s doc comment for why it is
+/// not gated behind an "active" check like the rest of this line).
+fn draw_ann_line3(f: &mut Frame, area: Rect, state: &RadioState) {
+    let mut labels: Vec<&str> = Vec::new();
+    if state.keyer_on {
+        labels.push("KYR");
+    }
+    if let Some(l) = scan_ann_label(state.scan_state) {
+        labels.push(l);
+    }
+    if state.vox_on {
+        labels.push("VOX");
+    }
+    if state.break_in_on {
+        labels.push("B-IN");
+    }
+    let agc = format!("AGC:{}", agc_mode_label(state.agc_mode));
+    let text = if labels.is_empty() {
+        agc
+    } else {
+        format!("{}  {agc}", labels.join(" "))
+    };
+    f.render_widget(Paragraph::new(Span::styled(text, on_style())), area);
 }
 
 /// Secondary, dim readout of VFO B's frequency. `Ft991aState` has no
@@ -424,6 +623,29 @@ fn draw_vfo_b_line(f: &mut Frame, area: Rect, state: &RadioState) {
 
 // ─── 5-row large frequency display (VFO A) ───────────────────────────────────
 
+/// Clarifier offset readout shown next to the big-digit VFO A frequency
+/// (`IF`'s P3, written by batch 3's `RD`/`RU`, cleared by `RC`; shared by RX
+/// and TX per `clarifier_offset_hz`'s own doc comment — no separate
+/// per-direction offset value exists). `None` when neither `rx_clarifier_on`
+/// nor `tx_clarifier_on` is set, so the readout is hidden exactly when a
+/// real front panel would hide it. `Ft991aState` has no "active VFO"
+/// selector (see this file's header doc comment / `RadioState`'s Wave 2
+/// finding), so unlike ts570d's RIT/XIT sub-display next to a VFO A/B
+/// badge, this has no badge to sit beside — it is simply appended to the
+/// big-digit block's middle row.
+fn clarifier_readout(state: &RadioState) -> Option<String> {
+    if !state.rx_clarifier_on && !state.tx_clarifier_on {
+        return None;
+    }
+    let dir = match (state.rx_clarifier_on, state.tx_clarifier_on) {
+        (true, true) => "R/T",
+        (true, false) => "RX",
+        (false, true) => "TX",
+        (false, false) => unreachable!("guarded by the early return above"),
+    };
+    Some(format!("CLAR {dir} {:+05}Hz", state.clarifier_offset_hz))
+}
+
 fn draw_freq_block(f: &mut Frame, area: Rect, state: &RadioState) {
     if area.height < 5 {
         return;
@@ -431,6 +653,7 @@ fn draw_freq_block(f: &mut Frame, area: Rect, state: &RadioState) {
 
     let freq_str = format_freq_ascii(state.vfo_a_hz);
     let rows = render_big_freq(&freq_str);
+    let clarifier = clarifier_readout(state);
 
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
@@ -445,10 +668,23 @@ fn draw_freq_block(f: &mut Frame, area: Rect, state: &RadioState) {
 
     for (i, row_text) in rows.iter().enumerate() {
         let row_area = row_areas[i];
-        let spans = vec![
+        let mut spans = vec![
             Span::raw("    "),
             Span::styled(row_text.clone(), on_style()),
         ];
+        // Middle row: append the clarifier readout, if active, after the
+        // big-digit glyphs.
+        if i == 2 {
+            if let Some(ref c) = clarifier {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    c.clone(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), row_area);
     }
 }
@@ -591,6 +827,22 @@ mod tests {
     fn test_lookup_description_known_and_unknown() {
         assert_eq!(lookup_description("FA"), Some("VFO A Frequency"));
         assert_eq!(lookup_description("ZZ"), None);
+        // Not just the original 11-command first slice — Wave 3 landed the
+        // remaining batches, so a batch-6 (`GT`, AGC) and the `EX` menu
+        // entry point must also resolve now that `lookup_description`
+        // reads the full `FT991A_COMMAND_TABLE`.
+        assert_eq!(lookup_description("GT"), Some("AGC Function"));
+        assert!(lookup_description("EX").is_some());
+    }
+
+    #[test]
+    fn test_command_table_fully_wired_wave4() {
+        // Regression guard for the Wave 4 §11.5 retarget: `tui.rs`'s
+        // `lookup_description` is expected to cover the now-full 91-entry
+        // table, not a stale first-slice subset. This doesn't hardcode 91
+        // (that number belongs to `radio`'s own tests) — it just asserts
+        // `tui.rs` sees more than the original Wave 2 slice of 11.
+        assert!(FT991A_COMMAND_TABLE.definitions().len() > 11);
     }
 
     #[test]
@@ -598,5 +850,71 @@ mod tests {
         assert_eq!(extract_command_code("→ FA;"), Some("FA"));
         assert_eq!(extract_command_code("← FA014000000;"), Some("FA"));
         assert_eq!(extract_command_code(""), None);
+    }
+
+    #[test]
+    fn test_meter_select_label() {
+        assert_eq!(meter_select_label(0), "COMP");
+        assert_eq!(meter_select_label(3), "SWR");
+        assert_eq!(meter_select_label(5), "VDD");
+        assert_eq!(meter_select_label(9), "?");
+    }
+
+    #[test]
+    fn test_agc_mode_label_full_7valued_domain() {
+        assert_eq!(agc_mode_label(0), "OFF");
+        assert_eq!(agc_mode_label(1), "FAST");
+        assert_eq!(agc_mode_label(2), "MID");
+        assert_eq!(agc_mode_label(3), "SLOW");
+        assert_eq!(agc_mode_label(4), "AUTO-F");
+        assert_eq!(agc_mode_label(5), "AUTO-M");
+        assert_eq!(agc_mode_label(6), "AUTO-S");
+        assert_eq!(agc_mode_label(9), "?");
+    }
+
+    #[test]
+    fn test_preamp_ann_label_ipo_hidden() {
+        assert_eq!(preamp_ann_label(0), None); // IPO — no annunciator lit
+        assert_eq!(preamp_ann_label(1), Some("AMP1"));
+        assert_eq!(preamp_ann_label(2), Some("AMP2"));
+    }
+
+    #[test]
+    fn test_scan_ann_label_off_hidden() {
+        assert_eq!(scan_ann_label(0), None); // scan off — no annunciator lit
+        assert_eq!(scan_ann_label(1), Some("SCAN\u{25b2}"));
+        assert_eq!(scan_ann_label(2), Some("SCAN\u{25bc}"));
+    }
+
+    #[test]
+    fn test_clarifier_readout_hidden_when_both_off() {
+        let state = RadioState::default();
+        assert_eq!(clarifier_readout(&state), None);
+    }
+
+    #[test]
+    fn test_clarifier_readout_shows_direction_and_signed_offset() {
+        let mut state = RadioState {
+            rx_clarifier_on: true,
+            clarifier_offset_hz: 250,
+            ..Default::default()
+        };
+        assert_eq!(
+            clarifier_readout(&state),
+            Some("CLAR RX +0250Hz".to_string())
+        );
+
+        state.tx_clarifier_on = true;
+        assert_eq!(
+            clarifier_readout(&state),
+            Some("CLAR R/T +0250Hz".to_string())
+        );
+
+        state.rx_clarifier_on = false;
+        state.clarifier_offset_hz = -9999;
+        assert_eq!(
+            clarifier_readout(&state),
+            Some("CLAR TX -9999Hz".to_string())
+        );
     }
 }

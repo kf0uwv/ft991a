@@ -134,3 +134,125 @@ intent)
    (4800/9600/19200/38400) but doesn't visually flag a factory default on
    the scanned page. Used this repo's own already-recorded default (9600,
    `src/main.rs` + `planning/app/task_plan.md` line 65) for consistency.
+
+## Wave 4, Task 10: `tui.rs` proportional growth (§11.5)
+
+### Goal
+Grow `emulator/src/tui.rs`'s existing regions (not a structural rewrite) to
+track `Ft991aState`'s Wave 3 growth (11 -> 91 commands, first-slice -> full
+state machine). Per `planning/architect/task_plan.md` §11.5: stay a flat,
+wider annunciator list (now wrapped across 2-3 lines), not a grouped/
+paginated display — the emulator has no keybindings, so `ui`'s
+discoverability-driven redesign pressure doesn't apply here.
+
+### Source of truth
+- `planning/architect/task_plan.md` §11.5 — full design read before starting.
+- `emulator/src/tui.rs` — Wave 2's implementation, read in full.
+- `radio/src/ft991a_radio.rs` — `Ft991aState`'s real (now much larger) field
+  list, `FT991A_COMMAND_TABLE` (confirmed 91 entries via the
+  `Ft991aCommandId` enum variant count), `AgcMode`/`PreampMode`/`ScanState`
+  domain enums (`radio_trait.rs`, all three publicly exported from `lib.rs`).
+- `ts570d/emulator/src/tui.rs` — re-checked precedent for flat-annunciator
+  density (ann_line1/ann_line2 pattern).
+
+### Plan (single task, mechanical field-by-field extension)
+1. **`draw_ann_line` -> `draw_ann_line1`/`draw_ann_line2`/`draw_ann_line3`**
+   (ts570d's ann_line1/ann_line2 naming precedent, extended to 3 lines to
+   fit the larger set): line 1 = core operating state (PWR/TX/RX plus
+   MOX/LOCK/MENU/PLL-UNLK); line 2 = front-end/audio processing toggles
+   (clarifier RX/TX-on, ATT, preamp AMP1/AMP2, NB, NR, NOTCH, NAR); line 3 =
+   keying/scan/VOX/break-in plus an always-visible AGC mode label (AGC is
+   never "off-screen" the way a toggle is — `OFF` is itself a meaningful
+   state to show, same idiom the mode row already uses for the always-shown
+   operating mode).
+2. **`draw_freq_block`**: add a clarifier offset readout (`clarifier_readout`
+   helper) appended to the big-digit block's middle row when either
+   `rx_clarifier_on` or `tx_clarifier_on` is set — shows direction (RX/TX/
+   R/T) and the shared signed `clarifier_offset_hz` value. No VFO A/B badge
+   exists in this slice (Wave 2 finding, unchanged), so it has no badge to
+   sit beside, unlike ts570d's RIT/XIT sub-display.
+3. **`draw_tx_meter`**: extended with a 6-way meter bank (COMP/ALC/PO/SWR/
+   ID/VDD, batch 9's `RM`/`MS` fields) below the existing PWR block, one row
+   per meter via a new `draw_meter_row` helper (label + bargraph + raw
+   0-255 value), with the front-panel `MS`-selected meter highlighted
+   amber/bold and the other five dimmed. PWR stays a separate row (reads
+   `power_control` watts, a distinct field/scale from `po_meter`'s raw `RM`
+   reading) rather than being folded into the bank as a 7th row.
+   `draw_rx_smeter` is unchanged — `RM`'s selector `1` (S-meter) is always
+   `smeter` regardless of TX/RX, so RX-side stays S-meter-only, matching the
+   real front panel's own RX/TX meter-source split.
+4. **`lookup_description`**: no code change needed — it already reads
+   `FT991A_COMMAND_TABLE.find(code)` unconditionally, and that static now
+   has 91 entries (Wave 3 landed all batches) vs. Wave 2's 11-entry
+   first-slice table, so the "retarget" is automatic. Added a regression
+   test (`test_command_table_fully_wired_wave4`) asserting the table has
+   grown past 11, plus extended `test_lookup_description_known_and_unknown`
+   with a batch-6 command (`GT`) and the `EX` entry point, so a future
+   accidental narrowing of the table or the lookup function would be caught.
+5. **`EX`-state dump nice-to-have**: explicitly deferred, not scoped in —
+   see Findings below.
+
+### Constraints
+- `emulator`-crate-only, specifically `tui.rs`; no other file needed.
+- Do not touch `radio/`, `ui/`, `src/main.rs`, root `Cargo.toml`, `ts570d`,
+  `radio-cat-rs`.
+- Do not commit.
+- Must pass: `cargo build -p emulator`, `cargo test -p emulator`,
+  `cargo clippy -p emulator --all-targets -- -D warnings`,
+  `cargo fmt --check -p emulator`; all 15 pre-existing tests must still pass.
+
+### Verification
+Build, test (22/22, 15 original + 7 new, no regressions), clippy, fmt all
+clean at the time of implementation — see `progress.md` for the full
+transcript and a note about a later, unrelated concurrent-session build
+break in `radio/` observed during final re-verification.
+
+### Findings / judgment calls
+
+1. **`EX`-state dump nice-to-have: deferred, not scoped in.** §11.5
+   explicitly frames this as optional ("your call to scope in or explicitly
+   defer, not a requirement"). Scoping it in would mean adding a CLI flag
+   or keypress, which touches `main.rs`/`emulator.rs` (args parsing, key
+   handling) beyond this task's `tui.rs`-only actual need, and duplicating
+   iteration logic over `EX_MENU_TABLE`'s 151 items — a meaningfully
+   separate unit of work from the mechanical field-by-field screen growth
+   this task is. Deferring keeps this task's diff scoped to exactly what
+   §11.5 calls "one task... mechanical field-by-field extension," and
+   avoids scope creep into files not strictly required. If wanted later,
+   it should be its own small task.
+2. **AGC mode shown always, not gated behind an "active" check.** The
+   architect's list groups "AGC mode" alongside on/off toggles like "VOX
+   on"/"attenuator on", but AGC always has *some* selected setting (`OFF`
+   is itself meaningful, unlike e.g. "attenuator" which has a real
+   "not present" state) — modeled as an always-visible label on ann line 3,
+   same idiom `draw_mode_row` already uses for the operating mode, not
+   filtered out like the rest of that line's items. Documented as a
+   judgment call in `agc_mode_label`'s doc comment.
+3. **Preamp/scan annunciators use FT-991A's actual domain enums, not raw
+   booleans.** `PreampMode`/`ScanState` (from `radio_trait.rs`, already
+   publicly exported) are 3-valued/3-valued, not plain bools — used
+   `TryFrom<u8>` + a local label match, the same pattern the pre-existing
+   mode row already uses for `Mode`. Preamp's `Ipo` (bypass) value shows no
+   annunciator (matches how a real front panel doesn't light `AMP1`/`AMP2`
+   when bypassed); scan's `Off` likewise shows nothing.
+4. **`meter_select`/`selected_meter_reading` duplicated as public logic,
+   not reused.** `Ft991aState::selected_meter_reading`/`meter_reading` in
+   `radio/src/ft991a_radio.rs` are private (`fn`, not `pub fn`) methods on
+   `impl Ft991aState` — not visible outside the `radio` crate. `tui.rs`
+   cannot call them, so it re-implements the same `meter_select -> which
+   *_meter field` mapping locally (`draw_meter_row`'s per-field calls in
+   `draw_tx_meter`, `meter_select_label`) directly against the public
+   `Ft991aState` fields (`meter_select`, `comp_meter`, ..., `vdd_meter`),
+   not by inventing new state. This is view-layer duplication of a
+   3-line match, not new radio-domain logic, and doesn't touch `radio/`.
+5. **No discrepancies found between the architect's §11.5 annunciator list
+   and `Ft991aState`'s real fields.** Every item on the architect's list
+   (clarifier RX/TX-on + offset, keyer enabled, scan state, VOX on,
+   attenuator on, preamp mode, noise blanker/reduction on, AGC mode,
+   auto-notch on, narrow on, frequency lock, mox, break-in on,
+   PLL-unlocked/menu-mode) maps 1:1 onto a real, public `Ft991aState`
+   field — unlike Wave 2, where several architect-anticipated fields
+   (RIT/XIT/split/antenna/AGC/NB annunciators) didn't exist yet. Wave 3
+   landed all of them in the interim.
+6. **A concurrent, unrelated `radio/` in-progress edit was observed during
+   final re-verification**, not caused by this task — see `progress.md`.

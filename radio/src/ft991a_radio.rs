@@ -2165,18 +2165,28 @@ pub fn apf_hz_to_raw(hz: i16) -> u16 {
 /// wire strings per item.
 #[derive(Debug, Clone, Copy)]
 pub enum ExMenuValueKind {
-    /// Exact wire strings from the manual's own P2 legend, e.g.
-    /// `&["0", "1", "2"]` for a 3-way named selector. **Not necessarily
-    /// zero-based or contiguous**: items 072/077 ("DATA PORT SELECT"/"FM
-    /// PKT PORT SELECT") legally start at `"1"` (`1: DATA 2: USB`), while
-    /// items 048/109 ("AM PORT SELECT"/"SSB PORT SELECT") start at `"0"`
-    /// (`0: DATA 1: USB`) for the same DATA/USB concept — a genuine manual
-    /// inconsistency, transcribed exactly rather than silently normalized
-    /// to one convention. Item 028 "GPS/232C SELECT" (`0:GPS1 1:GPS2
-    /// 3:RS232C`) has a documented gap at `2` — also transcribed exactly,
-    /// same treatment `RI`'s selector gap (batch 9) already established.
-    /// See [`EX_MENU_TABLE`]'s doc comment.
-    Enumerated(&'static [&'static str]),
+    /// `(wire, label)` pairs from the manual's own P2 legend, e.g.
+    /// `&[("0", "OFF"), ("1", "DAKY"), ("2", "RTS"), ("3", "DTR")]` for item
+    /// 060 "PC KEYING". The wire value is what actually goes on the CAT
+    /// wire (unchanged in meaning from this field's original bare
+    /// `&'static [&'static str]` shape); the label is the manual's own
+    /// human-readable name for that value, added so a `ListSelect`-driven
+    /// UI can show named options instead of raw digit strings (Wave 4,
+    /// `planning/architect/task_plan.md` §11.4's flagged UX gap). Every
+    /// label below is transcribed from this file's own pre-existing
+    /// [`EX_MENU_TABLE`] doc-comment legend tables (the manual citations
+    /// already recorded there), not re-read from the manual PDF fresh.
+    ///
+    /// **Not necessarily zero-based or contiguous**: items 072/077 ("DATA
+    /// PORT SELECT"/"FM PKT PORT SELECT") legally start at `"1"` (`1: DATA
+    /// 2: USB`), while items 048/109 ("AM PORT SELECT"/"SSB PORT SELECT")
+    /// start at `"0"` (`0: DATA 1: USB`) for the same DATA/USB concept — a
+    /// genuine manual inconsistency, transcribed exactly rather than
+    /// silently normalized to one convention. Item 028 "GPS/232C SELECT"
+    /// (`0:GPS1 1:GPS2 3:RS232C`) has a documented gap at `2` — also
+    /// transcribed exactly, same treatment `RI`'s selector gap (batch 9)
+    /// already established. See [`EX_MENU_TABLE`]'s doc comment.
+    Enumerated(&'static [(&'static str, &'static str)]),
     /// A numeric range `min..=max` at a fixed `step`, all already in the
     /// manual's own raw P2 wire units — any documented scale factor (e.g.
     /// item 014 "CW WEIGHT"'s "2.5 ~ 4.5" ratio is wire-encoded as `P2 =
@@ -2204,10 +2214,15 @@ impl ExMenuValueKind {
     /// value, or `None` if it is not legal for this kind (wrong sign
     /// character, non-digit content, out of range, or off the declared
     /// `step`).
-    fn parse(&self, wire: &str) -> Option<i32> {
+    ///
+    /// `pub(crate)` (not private) so `ft991a.rs`'s
+    /// `Ft991a::get_ex_menu_item`/`set_ex_menu_item` (`Ft991aExtras`, Wave
+    /// 4) can reuse the exact same parse logic `handle_command`'s `Ex` arm
+    /// already uses, rather than reimplementing it client-side.
+    pub(crate) fn parse(&self, wire: &str) -> Option<i32> {
         match self {
             ExMenuValueKind::Enumerated(values) => {
-                if values.contains(&wire) {
+                if values.iter().any(|(w, _)| *w == wire) {
                     wire.parse().ok()
                 } else {
                     None
@@ -2242,13 +2257,38 @@ impl ExMenuValueKind {
     /// Format an already-validated integer `value` back onto the wire at
     /// `digits` total width (zero-padded; signed ranges reserve the first
     /// character for an explicit `+`/`-`).
-    fn format(&self, value: i32, digits: usize) -> String {
+    ///
+    /// `pub(crate)` for the same reason as [`Self::parse`] — reused by
+    /// `ft991a.rs`'s `get_ex_menu_item`/`set_ex_menu_item`.
+    pub(crate) fn format(&self, value: i32, digits: usize) -> String {
         match self {
             ExMenuValueKind::Range { signed: true, .. } => {
                 let sign = if value < 0 { '-' } else { '+' };
                 format!("{sign}{:0width$}", value.abs(), width = digits - 1)
             }
             _ => format!("{value:0digits$}"),
+        }
+    }
+
+    /// Look up the manual's human-readable label for an already-validated
+    /// integer `value` (as produced by [`Self::parse`]/read back from
+    /// state) — `None` for [`ExMenuValueKind::Range`] (no discrete labels
+    /// to show) or for a `value` that doesn't match any of this
+    /// [`ExMenuValueKind::Enumerated`] variant's wire values (shouldn't
+    /// happen for a value that already round-tripped through `parse`, but
+    /// handled without panicking either way). Intended for a future
+    /// `ListSelect`-driven UI (`planning/architect/task_plan.md` §11.4) —
+    /// not consumed anywhere in this crate yet.
+    pub fn label_for_value(&self, value: i32, digits: usize) -> Option<&'static str> {
+        match self {
+            ExMenuValueKind::Enumerated(values) => {
+                let wire = self.format(value, digits);
+                values
+                    .iter()
+                    .find(|(w, _)| *w == wire)
+                    .map(|(_, label)| *label)
+            }
+            ExMenuValueKind::Range { .. } => None,
         }
     }
 }
@@ -2610,7 +2650,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 4,
         name: "HOME FUNCTION",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "SCOPE"), ("1", "FUNCTION")]),
     },
     ExMenuItem {
         p1: 5,
@@ -2627,13 +2667,21 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 6,
         name: "DISPLAY COLOR",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4", "5", "6"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "BLUE"),
+            ("1", "GRAY"),
+            ("2", "GREEN"),
+            ("3", "ORANGE"),
+            ("4", "PURPLE"),
+            ("5", "RED"),
+            ("6", "SKY BLUE"),
+        ]),
     },
     ExMenuItem {
         p1: 7,
         name: "DIMMER LED",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "1"), ("1", "2")]),
     },
     ExMenuItem {
         p1: 8,
@@ -2650,7 +2698,12 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 9,
         name: "BAR MTR PEAK HOLD",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "OFF"),
+            ("1", "0.5sec"),
+            ("2", "1.0sec"),
+            ("3", "2.0sec"),
+        ]),
     },
     ExMenuItem {
         p1: 10,
@@ -2678,13 +2731,20 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 12,
         name: "KEYER TYPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4", "5"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "OFF"),
+            ("1", "BUG"),
+            ("2", "ELEKEY-A"),
+            ("3", "ELEKEY-B"),
+            ("4", "ELEKEY-Y"),
+            ("5", "ACS"),
+        ]),
     },
     ExMenuItem {
         p1: 13,
         name: "KEYER DOT/DASH",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "NORMAL"), ("1", "REVERSE")]),
     },
     ExMenuItem {
         p1: 14,
@@ -2712,7 +2772,15 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 16,
         name: "NUMBER STYLE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4", "5", "6"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "1290"),
+            ("1", "AUNO"),
+            ("2", "AUNT"),
+            ("3", "A2NO"),
+            ("4", "A2NT"),
+            ("5", "12NO"),
+            ("6", "12NT"),
+        ]),
     },
     ExMenuItem {
         p1: 17,
@@ -2729,43 +2797,43 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 18,
         name: "CW MEMORY 1",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "TEXT"), ("1", "MESSAGE")]),
     },
     ExMenuItem {
         p1: 19,
         name: "CW MEMORY 2",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "TEXT"), ("1", "MESSAGE")]),
     },
     ExMenuItem {
         p1: 20,
         name: "CW MEMORY 3",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "TEXT"), ("1", "MESSAGE")]),
     },
     ExMenuItem {
         p1: 21,
         name: "CW MEMORY 4",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "TEXT"), ("1", "MESSAGE")]),
     },
     ExMenuItem {
         p1: 22,
         name: "CW MEMORY 5",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "TEXT"), ("1", "MESSAGE")]),
     },
     ExMenuItem {
         p1: 23,
         name: "NB WIDTH",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "1ms"), ("1", "3ms"), ("2", "10ms")]),
     },
     ExMenuItem {
         p1: 24,
         name: "NB REJECTION",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "10dB"), ("1", "30dB"), ("2", "50dB")]),
     },
     ExMenuItem {
         p1: 25,
@@ -2794,43 +2862,63 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 28,
         name: "GPS/232C SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "GPS1"), ("1", "GPS2"), ("3", "RS232C")]),
     },
     ExMenuItem {
         p1: 29,
         name: "232C RATE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "4800bps"),
+            ("1", "9600bps"),
+            ("2", "19200bps"),
+            ("3", "38400bps"),
+        ]),
     },
     ExMenuItem {
         p1: 30,
         name: "232C TOT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "10msec"),
+            ("1", "100msec"),
+            ("2", "1000msec"),
+            ("3", "3000msec"),
+        ]),
     },
     ExMenuItem {
         p1: 31,
         name: "CAT RATE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "4800bps"),
+            ("1", "9600bps"),
+            ("2", "19200bps"),
+            ("3", "38400bps"),
+        ]),
     },
     ExMenuItem {
         p1: 32,
         name: "CAT TOT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "10msec"),
+            ("1", "100msec"),
+            ("2", "1000msec"),
+            ("3", "3000msec"),
+        ]),
     },
     ExMenuItem {
         p1: 33,
         name: "CAT RTS",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DISABLE"), ("1", "ENABLE")]),
     },
     ExMenuItem {
         p1: 34,
         name: "MEM GROUP",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DISABLE"), ("1", "ENABLE")]),
     },
     ExMenuItem {
         p1: 35,
@@ -2858,13 +2946,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 37,
         name: "MIC SCAN",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DISABLE"), ("1", "ENABLE")]),
     },
     ExMenuItem {
         p1: 38,
         name: "MIC SCAN RESUME",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "PAUSE"), ("1", "TIME")]),
     },
     ExMenuItem {
         p1: 39,
@@ -2881,7 +2969,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 40,
         name: "CLAR MODE SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "RX"), ("1", "TX"), ("2", "TRX")]),
     },
     ExMenuItem {
         p1: 41,
@@ -2898,7 +2986,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 42,
         name: "AM LCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 43,
@@ -2915,13 +3003,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 44,
         name: "AM HCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 45,
         name: "AM MIC SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MIC"), ("1", "REAR")]),
     },
     ExMenuItem {
         p1: 46,
@@ -2938,13 +3026,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 47,
         name: "AM PTT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DAKY"), ("1", "RTS"), ("2", "DTR")]),
     },
     ExMenuItem {
         p1: 48,
         name: "AM PORT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DATA"), ("1", "USB")]),
     },
     ExMenuItem {
         p1: 49,
@@ -2972,7 +3060,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 51,
         name: "CW LCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 52,
@@ -2989,7 +3077,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 53,
         name: "CW HCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 54,
@@ -3006,13 +3094,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 55,
         name: "CW AUTO MODE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "OFF"), ("1", "50MHz"), ("2", "ON")]),
     },
     ExMenuItem {
         p1: 56,
         name: "CW BK-IN TYPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "SEMI BREAK-IN"), ("1", "FULL BREAK-IN")]),
     },
     ExMenuItem {
         p1: 57,
@@ -3029,37 +3117,52 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 58,
         name: "CW WAVE SHAPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "1msec"),
+            ("1", "2msec"),
+            ("2", "4msec"),
+            ("3", "6msec"),
+        ]),
     },
     ExMenuItem {
         p1: 59,
         name: "CW FREQ DISPLAY",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DIRECT FREQ"), ("1", "PITCH OFFSET")]),
     },
     ExMenuItem {
         p1: 60,
         name: "PC KEYING",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "OFF"),
+            ("1", "DAKY"),
+            ("2", "RTS"),
+            ("3", "DTR"),
+        ]),
     },
     ExMenuItem {
         p1: 61,
         name: "QSK DELAY TIME",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "15msec"),
+            ("1", "20msec"),
+            ("2", "25msec"),
+            ("3", "30msec"),
+        ]),
     },
     ExMenuItem {
         p1: 62,
         name: "DATA MODE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "PSK"), ("1", "OTHER")]),
     },
     ExMenuItem {
         p1: 63,
         name: "PSK TONE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "1000Hz"), ("1", "1500Hz"), ("2", "2000Hz")]),
     },
     ExMenuItem {
         p1: 64,
@@ -3098,7 +3201,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 67,
         name: "DATA LCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     // 068/069: manual's own printed Digits column literally shows 1/2, but
     // that is functionally impossible for 068 (legend needs values up to
@@ -3122,25 +3225,25 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 69,
         name: "DATA HCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 70,
         name: "DATA IN SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MIC"), ("1", "REAR")]),
     },
     ExMenuItem {
         p1: 71,
         name: "DATA PTT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DAKY"), ("1", "RTS"), ("2", "DTR")]),
     },
     ExMenuItem {
         p1: 72,
         name: "DATA PORT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("1", "DATA"), ("2", "USB")]),
     },
     ExMenuItem {
         p1: 73,
@@ -3157,7 +3260,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 74,
         name: "FM MIC SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MIC"), ("1", "REAR")]),
     },
     ExMenuItem {
         p1: 75,
@@ -3174,13 +3277,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 76,
         name: "FM PKT PTT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DAKY"), ("1", "RTS"), ("2", "DTR")]),
     },
     ExMenuItem {
         p1: 77,
         name: "FM PKT PORT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("1", "DATA"), ("2", "USB")]),
     },
     ExMenuItem {
         p1: 78,
@@ -3197,7 +3300,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 79,
         name: "FM PKT MODE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "1200"), ("1", "9600")]),
     },
     // -- Fourth sub-batch: items 080-153, minus 087 (skipped) and 108/109
     // (already landed above) -----------------------------------------
@@ -3249,44 +3352,55 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 84,
         name: "ARS 144MHz",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "OFF"), ("1", "ON")]),
     },
     ExMenuItem {
         p1: 85,
         name: "ARS 430MHz",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "OFF"), ("1", "ON")]),
     },
     ExMenuItem {
         p1: 86,
         name: "DCS POLARITY",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "Tn-Rn"),
+            ("1", "Tn-Riv"),
+            ("2", "Tiv-Rn"),
+            ("3", "Tiv-Riv"),
+        ]),
     },
     // 087 "RADIO ID" permanently skipped — see module docs/findings.md.
     ExMenuItem {
         p1: 88,
         name: "GM DISPLY",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DISTANCE"), ("1", "STRENGTH")]),
     },
     ExMenuItem {
         p1: 89,
         name: "DISTANCE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "km"), ("1", "mile")]),
     },
     ExMenuItem {
         p1: 90,
         name: "AMS TX MODE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "AUTO"),
+            ("1", "MANUAL"),
+            ("2", "DN"),
+            ("3", "VW"),
+            ("4", "ANALOG"),
+        ]),
     },
     ExMenuItem {
         p1: 91,
         name: "STANDBY BEEP",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "OFF"), ("1", "ON")]),
     },
     ExMenuItem {
         p1: 92,
@@ -3303,7 +3417,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 93,
         name: "RTTY LCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 94,
@@ -3320,25 +3434,25 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 95,
         name: "RTTY HCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 96,
         name: "RTTY SHIFT PORT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "SHIFT"), ("1", "DTR"), ("2", "RTS")]),
     },
     ExMenuItem {
         p1: 97,
         name: "RTTY POLARITY-RX",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "NORMAL"), ("1", "REVERSE")]),
     },
     ExMenuItem {
         p1: 98,
         name: "RTTY POLARITY-TX",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "NORMAL"), ("1", "REVERSE")]),
     },
     ExMenuItem {
         p1: 99,
@@ -3358,13 +3472,18 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 100,
         name: "RTTY SHIFT FREQ",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "170Hz"),
+            ("1", "200Hz"),
+            ("2", "425Hz"),
+            ("3", "850Hz"),
+        ]),
     },
     ExMenuItem {
         p1: 101,
         name: "RTTY MARK FREQ",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("1", "1275Hz"), ("2", "2125Hz")]),
     },
     ExMenuItem {
         p1: 102,
@@ -3381,7 +3500,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 103,
         name: "SSB LCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 104,
@@ -3398,13 +3517,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 105,
         name: "SSB HCUT SLOPE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "6dB/oct"), ("1", "18dB/oct")]),
     },
     ExMenuItem {
         p1: 106,
         name: "SSB MIC SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MIC"), ("1", "REAR")]),
     },
     ExMenuItem {
         p1: 107,
@@ -3421,25 +3540,31 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 108,
         name: "SSB PTT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DAKY"), ("1", "RTS"), ("2", "DTR")]),
     },
     ExMenuItem {
         p1: 109,
         name: "SSB PORT SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DATA"), ("1", "USB")]),
     },
     ExMenuItem {
         p1: 110,
         name: "SSB TX BPF",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "50~3000"),
+            ("1", "100~2900"),
+            ("2", "200~2800"),
+            ("3", "300~2700"),
+            ("4", "400~2600"),
+        ]),
     },
     ExMenuItem {
         p1: 111,
         name: "APF WIDTH",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "NARROW"), ("1", "MEDIUM"), ("2", "WIDE")]),
     },
     ExMenuItem {
         p1: 112,
@@ -3467,13 +3592,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 114,
         name: "IF NOTCH WIDTH",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "NARROW"), ("1", "WIDE")]),
     },
     ExMenuItem {
         p1: 115,
         name: "SCP DISPLAY MODE",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "SPECTRUM"), ("1", "WATER FALL")]),
     },
     // 116 "SCP SPAN FREQ" has a documented gap: legal values are 03-07
     // only (00-02 absent from the manual) — see module docs.
@@ -3481,19 +3606,42 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 116,
         name: "SCP SPAN FREQ",
         digits: 2,
-        kind: ExMenuValueKind::Enumerated(&["03", "04", "05", "06", "07"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("03", "50kHz"),
+            ("04", "100kHz"),
+            ("05", "200kHz"),
+            ("06", "500kHz"),
+            ("07", "1000kHz"),
+        ]),
     },
     ExMenuItem {
         p1: 117,
         name: "SPECTRUM COLOR",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4", "5", "6"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "BLUE"),
+            ("1", "GRAY"),
+            ("2", "GREEN"),
+            ("3", "ORANGE"),
+            ("4", "PURPLE"),
+            ("5", "RED"),
+            ("6", "SKY BLUE"),
+        ]),
     },
     ExMenuItem {
         p1: 118,
         name: "WATER FALL COLOR",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4", "5", "6", "7"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "BLUE"),
+            ("1", "GRAY"),
+            ("2", "GREEN"),
+            ("3", "ORANGE"),
+            ("4", "PURPLE"),
+            ("5", "RED"),
+            ("6", "SKY BLUE"),
+            ("7", "MULTI"),
+        ]),
     },
     ExMenuItem {
         p1: 119,
@@ -3741,13 +3889,19 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 141,
         name: "TUNER SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1", "2", "3", "4"]),
+        kind: ExMenuValueKind::Enumerated(&[
+            ("0", "OFF"),
+            ("1", "INTERNAL"),
+            ("2", "EXTERNAL"),
+            ("3", "ATAS"),
+            ("4", "LAMP"),
+        ]),
     },
     ExMenuItem {
         p1: 142,
         name: "VOX SELECT",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MIC"), ("1", "DATA")]),
     },
     ExMenuItem {
         p1: 143,
@@ -3821,13 +3975,13 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 149,
         name: "EMERGENCY FREQ TX",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "DISABLE"), ("1", "ENABLE")]),
     },
     ExMenuItem {
         p1: 150,
         name: "PRT/WIRES FREQ",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "MANUAL"), ("1", "PRESET")]),
     },
     ExMenuItem {
         p1: 151,
@@ -3844,7 +3998,7 @@ pub static EX_MENU_TABLE: &[ExMenuItem] = &[
         p1: 152,
         name: "SEARCH SETUP",
         digits: 1,
-        kind: ExMenuValueKind::Enumerated(&["0", "1"]),
+        kind: ExMenuValueKind::Enumerated(&[("0", "HISTORY"), ("1", "ACTIVITY")]),
     },
     ExMenuItem {
         p1: 153,
