@@ -151,6 +151,14 @@ fn group_for_key(key: char) -> Option<CommandGroup> {
 /// this task's final report, not silently substituted.
 pub(crate) const EX_NUMBER_ENTRY_KEY: char = 'N';
 
+/// The `Menu`-level keybinding for the profile list (`planning/architect/
+/// task_plan.md` §12.3) — a cross-cutting bulk-apply action, not a
+/// `CommandGroup`, so it lives alongside [`EX_NUMBER_ENTRY_KEY`] as its own
+/// top-level escape hatch rather than as a 13th group. `'L'` (mnemonic:
+/// "Load profile") — verified unique against every [`ALL_GROUPS`] key plus
+/// `Q`/[`EX_NUMBER_ENTRY_KEY`] by `test_profile_list_key_is_unique`.
+pub(crate) const PROFILE_LIST_KEY: char = 'L';
+
 /// Return the `(key, label)` pairs for rendering the `Menu` screen's group
 /// list. Does not include the fixed `[Q] Quit` entry — see
 /// `layout::draw_control_panel`.
@@ -649,6 +657,15 @@ pub enum ExecuteAction {
     /// [`SelectAction::SetExMenuItem`]) for
     /// [`ExMenuValueKind::Enumerated`] items.
     SetExMenuItem(u16, i32),
+    // --- Profiles (`planning/architect/task_plan.md` §12.3) ---
+    /// Apply a named settings profile ([`radio::Profile::apply`]) —
+    /// produced by [`ControlState::ProfileList`]'s `Enter`. Carries the
+    /// already-resolved name + [`radio::Profile`] value (not an index into
+    /// the list) because `handle_key` transitions to `Feedback` in the same
+    /// match arm that produces this action, the same shape every other
+    /// group's `Immediate` command follows — the profile list itself is not
+    /// reachable anymore once that transition happens.
+    ApplyProfile(String, radio::Profile),
 }
 
 /// The grouped interactive control panel state machine.
@@ -711,6 +728,21 @@ pub enum ControlState {
     /// the fork's own `Esc` returns to the right place). `Esc` here ->
     /// `GroupMenu { group: CommandGroup::ExMenu, .. }` (the theme picker).
     ExSubGroupMenu { theme: ExTheme, cursor: usize },
+    /// Showing the list of profiles discovered in the default profile
+    /// directory ([`radio::default_profile_dir`]) — reachable from `Menu`
+    /// via [`PROFILE_LIST_KEY`] (`planning/architect/task_plan.md` §12.3).
+    /// `profiles` is populated once, at entry (loading is a blocking
+    /// filesystem read, not something to redo per keystroke). `error`
+    /// surfaces a profile that failed to parse (per-file, not fatal to the
+    /// whole list — see [`radio::Profile::load_all_from_dir`]'s own doc
+    /// comment) or "no profiles found." `Up`/`Down` scroll like
+    /// `ExSubGroupMenu`; `Enter` produces
+    /// [`ExecuteAction::ApplyProfile`]; `Esc` -> `Menu`.
+    ProfileList {
+        profiles: Vec<(String, radio::Profile)>,
+        cursor: usize,
+        error: Option<String>,
+    },
     /// User is typing text input.
     TextInput {
         prompt: String,
@@ -3499,6 +3531,28 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
                 };
                 KeyResult::Continue
             }
+            KeyCode::Char(c) if c.to_ascii_uppercase() == PROFILE_LIST_KEY => {
+                let dir = radio::default_profile_dir();
+                let (profiles, errors) = match &dir {
+                    Some(dir) => radio::Profile::load_all_from_dir(dir),
+                    None => (Vec::new(), Vec::new()),
+                };
+                let error = if dir.is_none() {
+                    Some("Could not determine profile directory".to_string())
+                } else if profiles.is_empty() && errors.is_empty() {
+                    Some("No profiles found".to_string())
+                } else if let Some((name, err)) = errors.first() {
+                    Some(format!("{name}: {err}"))
+                } else {
+                    None
+                };
+                *state = ControlState::ProfileList {
+                    profiles,
+                    cursor: 0,
+                    error,
+                };
+                KeyResult::Continue
+            }
             KeyCode::Char(c) => {
                 if let Some(group) = group_for_key(c) {
                     *state = ControlState::GroupMenu { group, cursor: 0 };
@@ -3597,6 +3651,43 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
                     group: CommandGroup::ExMenu,
                     cursor: 0,
                 };
+                KeyResult::Continue
+            }
+            _ => KeyResult::Continue,
+        },
+
+        ControlState::ProfileList {
+            profiles,
+            cursor,
+            error,
+        } => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if *cursor > 0 {
+                    *cursor -= 1;
+                }
+                KeyResult::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = profiles.len().saturating_sub(1);
+                if *cursor < max {
+                    *cursor += 1;
+                }
+                KeyResult::Continue
+            }
+            KeyCode::Enter => {
+                let Some((name, profile)) = profiles.get(*cursor) else {
+                    *error = Some("No profile selected".to_string());
+                    return KeyResult::Continue;
+                };
+                let exec = ExecuteAction::ApplyProfile(name.clone(), profile.clone());
+                *state = ControlState::Feedback {
+                    message: String::new(),
+                    is_error: false,
+                };
+                KeyResult::Execute(exec)
+            }
+            KeyCode::Esc => {
+                *state = ControlState::Menu;
                 KeyResult::Continue
             }
             _ => KeyResult::Continue,
@@ -8652,5 +8743,130 @@ mod tests {
             validate_text_input(action_a, "100"),
             validate_text_input(action_b, "100")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Profiles (`planning/architect/task_plan.md` §12.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_profile_list_key_is_unique() {
+        let mut keys: Vec<char> = ALL_GROUPS.iter().map(|&g| group_key(g)).collect();
+        keys.push('Q');
+        keys.push(EX_NUMBER_ENTRY_KEY);
+        keys.push(PROFILE_LIST_KEY);
+        let before = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            before,
+            "PROFILE_LIST_KEY must not collide with any group key, Quit, or EX_NUMBER_ENTRY_KEY"
+        );
+    }
+
+    #[test]
+    fn test_menu_profile_list_key_reachable() {
+        let mut state = ControlState::Menu;
+        let result = handle_key(key(KeyCode::Char(PROFILE_LIST_KEY)), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::ProfileList { .. }));
+    }
+
+    #[test]
+    fn test_menu_profile_list_key_is_case_insensitive() {
+        let mut state = ControlState::Menu;
+        let result = handle_key(
+            key(KeyCode::Char(PROFILE_LIST_KEY.to_ascii_lowercase())),
+            &mut state,
+            &display(),
+        );
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::ProfileList { .. }));
+    }
+
+    fn sample_profiles() -> Vec<(String, radio::Profile)> {
+        vec![
+            (
+                "contest".to_string(),
+                radio::Profile {
+                    mode: Some(Mode::CwU),
+                    ..Default::default()
+                },
+            ),
+            (
+                "dx".to_string(),
+                radio::Profile {
+                    mode: Some(Mode::Usb),
+                    squelch: Some(10),
+                    ..Default::default()
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_profile_list_cursor_clamped_at_bounds() {
+        let mut state = ControlState::ProfileList {
+            profiles: sample_profiles(),
+            cursor: 0,
+            error: None,
+        };
+        handle_key(key(KeyCode::Up), &mut state, &display());
+        assert!(matches!(state, ControlState::ProfileList { cursor: 0, .. }));
+
+        handle_key(key(KeyCode::Down), &mut state, &display());
+        assert!(matches!(state, ControlState::ProfileList { cursor: 1, .. }));
+
+        // Already at the last entry (2 profiles, max index 1) — stays put.
+        handle_key(key(KeyCode::Down), &mut state, &display());
+        assert!(matches!(state, ControlState::ProfileList { cursor: 1, .. }));
+    }
+
+    #[test]
+    fn test_profile_list_enter_produces_apply_profile_action() {
+        let profiles = sample_profiles();
+        let expected_profile = profiles[1].1.clone();
+        let mut state = ControlState::ProfileList {
+            profiles,
+            cursor: 1,
+            error: None,
+        };
+        let result = handle_key(key(KeyCode::Enter), &mut state, &display());
+        assert_eq!(
+            result,
+            KeyResult::Execute(ExecuteAction::ApplyProfile(
+                "dx".to_string(),
+                expected_profile
+            ))
+        );
+        assert!(matches!(state, ControlState::Feedback { .. }));
+    }
+
+    #[test]
+    fn test_profile_list_enter_with_no_profiles_sets_error() {
+        let mut state = ControlState::ProfileList {
+            profiles: Vec::new(),
+            cursor: 0,
+            error: None,
+        };
+        let result = handle_key(key(KeyCode::Enter), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        match state {
+            ControlState::ProfileList { error, .. } => assert!(error.is_some()),
+            other => panic!("expected ProfileList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_profile_list_esc_returns_to_menu() {
+        let mut state = ControlState::ProfileList {
+            profiles: sample_profiles(),
+            cursor: 0,
+            error: None,
+        };
+        let result = handle_key(key(KeyCode::Esc), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::Menu));
     }
 }

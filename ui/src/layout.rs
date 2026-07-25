@@ -395,6 +395,7 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
     match state {
         ControlState::Menu => {
             let mut items = menu_group_labels();
+            items.push((crate::control::PROFILE_LIST_KEY, "Profiles"));
             items.push(('Q', "Quit"));
             f.render_widget(Paragraph::new(build_menu_column(&items)), inner);
         }
@@ -424,6 +425,17 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
         // show that many rows at once.
         ControlState::ExSubGroupMenu { theme, cursor } => {
             draw_ex_sub_group_menu(f, inner, *theme, *cursor);
+        }
+
+        // Profile list (§12.3) — same scrolling-list shape as
+        // `ExSubGroupMenu`, since a profile directory can hold an arbitrary
+        // number of entries.
+        ControlState::ProfileList {
+            profiles,
+            cursor,
+            error,
+        } => {
+            draw_profile_list(f, inner, profiles, *cursor, error.as_deref());
         }
 
         // For input/selection/feedback states, use the same 3-line layout
@@ -523,10 +535,12 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                     f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
                 }
 
-                // Menu, GroupMenu, and ExSubGroupMenu are handled above.
+                // Menu, GroupMenu, ExSubGroupMenu, and ProfileList are
+                // handled above.
                 ControlState::Menu
                 | ControlState::GroupMenu { .. }
-                | ControlState::ExSubGroupMenu { .. } => {}
+                | ControlState::ExSubGroupMenu { .. }
+                | ControlState::ProfileList { .. } => {}
             }
         }
     }
@@ -607,6 +621,79 @@ fn draw_ex_sub_group_menu(f: &mut Frame, area: Rect, theme: ExTheme, cursor: usi
         Span::styled(" scroll  ", hint_style),
         Span::styled("[Enter]", key_style),
         Span::styled(" select  ", hint_style),
+        Span::styled("[Esc]", key_style),
+        Span::styled(" back", hint_style),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+// ---------------------------------------------------------------------------
+// draw_profile_list — §12.3
+// ---------------------------------------------------------------------------
+
+/// Draw the profile list (`ControlState::ProfileList`) — same scrolling-list
+/// shape as [`draw_ex_sub_group_menu`], since a profile directory can hold
+/// an arbitrary number of files.
+fn draw_profile_list(
+    f: &mut Frame,
+    area: Rect,
+    profiles: &[(String, radio::Profile)],
+    cursor: usize,
+    error: Option<&str>,
+) {
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
+    let selected_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!("Profiles — {} found", profiles.len()),
+        header_style,
+    ))];
+    if let Some(err) = error {
+        lines.push(Line::from(Span::styled(
+            format!("⚠ {}", err),
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        lines.push(Line::from(""));
+    }
+
+    let visible = (area.height as usize).saturating_sub(4).max(1);
+    let start = if profiles.len() <= visible {
+        0
+    } else {
+        cursor
+            .saturating_sub(visible / 2)
+            .min(profiles.len() - visible)
+    };
+    let end = (start + visible).min(profiles.len());
+
+    for (idx, (name, _)) in profiles[start..end].iter().enumerate() {
+        let idx = start + idx;
+        if idx == cursor {
+            lines.push(Line::from(Span::styled(
+                format!("> {name}"),
+                selected_style,
+            )));
+        } else {
+            lines.push(Line::from(Span::raw(format!("  {name}"))));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("[Up/Down]", key_style),
+        Span::styled(" scroll  ", hint_style),
+        Span::styled("[Enter]", key_style),
+        Span::styled(" apply  ", hint_style),
         Span::styled("[Esc]", key_style),
         Span::styled(" back", hint_style),
     ]));

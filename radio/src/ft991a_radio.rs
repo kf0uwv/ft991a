@@ -1410,7 +1410,7 @@ const SET_25: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 25)];
 /// 38-byte write body ([`ChannelStatusFields::WIRE_WIDTH`] + 1 reserved
 /// byte + the 12-character tag — manual p.12).
 const MT_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 3),
+    CommandForm::selector_read(3),
     CommandForm::fixed(CommandOperation::Set, 38),
 ];
 const NONE: &[CommandForm] = &[];
@@ -1430,7 +1430,7 @@ const ACTION: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Action, 0)
 /// here, and `handle_command` disambiguates read-vs-write by
 /// `request.parameters.raw().len()` rather than `request.operation` alone.
 const MD_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
@@ -1466,12 +1466,12 @@ const MD_SET_FORMS: &[CommandForm] = &[
 /// validation still per-item" pattern `FA`'s range check already
 /// demonstrates.
 const EX_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 3), // read: EX<P1>;
-    CommandForm::fixed(CommandOperation::Set, 4), // write, P2 digits=1
-    CommandForm::fixed(CommandOperation::Set, 5), // write, P2 digits=2
-    CommandForm::fixed(CommandOperation::Set, 6), // write, P2 digits=3
-    CommandForm::fixed(CommandOperation::Set, 7), // write, P2 digits=4
-    CommandForm::fixed(CommandOperation::Set, 8), // write, P2 digits=5
+    CommandForm::selector_read(3),                 // read: EX<P1>;
+    CommandForm::fixed(CommandOperation::Set, 4),  // write, P2 digits=1
+    CommandForm::fixed(CommandOperation::Set, 5),  // write, P2 digits=2
+    CommandForm::fixed(CommandOperation::Set, 6),  // write, P2 digits=3
+    CommandForm::fixed(CommandOperation::Set, 7),  // write, P2 digits=4
+    CommandForm::fixed(CommandOperation::Set, 8),  // write, P2 digits=5
     CommandForm::fixed(CommandOperation::Set, 11), // write, P2 digits=8 (item 151, the sole 8-digit outlier)
 ];
 
@@ -1481,7 +1481,7 @@ const EX_SET_FORMS: &[CommandForm] = &[
 /// const per this table's existing one-const-per-command convention (manual
 /// p.5).
 const CT_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
@@ -1489,7 +1489,7 @@ const CT_SET_FORMS: &[CommandForm] = &[
 /// fixed P1 + the CTCSS/DCS table selector P2) and the write width
 /// (`CN0<P2><3-digit P3>;`, 5 chars) — manual p.5.
 const CN_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 2),
+    CommandForm::selector_read(2),
     CommandForm::fixed(CommandOperation::Set, 5),
 ];
 
@@ -1498,7 +1498,7 @@ const CN_SET_FORMS: &[CommandForm] = &[
 /// docs' "IS, a resolved manual discrepancy" section for why this is 4
 /// digits, not the 3 the per-command box's column diagram literally shows).
 const IS_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 6),
 ];
 
@@ -1509,7 +1509,7 @@ const IS_SET_FORMS: &[CommandForm] = &[
 /// selector read" section for why this uses `CommandForm::variable` rather
 /// than a discrete list of widths like [`EX_SET_FORMS`].
 const KM_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::variable(CommandOperation::Set, 2, 51),
 ];
 
@@ -1517,31 +1517,31 @@ const KM_SET_FORMS: &[CommandForm] = &[
 /// write width (`RA0<P2>;`, 2 chars) — same "selector read" shape as
 /// [`CT_SET_FORMS`] (manual p.15).
 const RA_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `PA`'s two Set widths — same shape as [`RA_SET_FORMS`] (manual p.14).
 const PA_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `NB`'s two Set widths — same shape as [`RA_SET_FORMS`] (manual p.13).
 const NB_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `NR`'s two Set widths — same shape as [`RA_SET_FORMS`] (manual p.13).
 const NR_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `BC`'s two Set widths — same shape as [`RA_SET_FORMS`] (manual p.4).
 const BC_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
@@ -1550,7 +1550,7 @@ const BC_SET_FORMS: &[CommandForm] = &[
 /// per-command box's own wire cells literally read `M A P1 P2 ;` (not `N A
 /// P1 P2 ;`), resolved in favor of the master-table code `NA`.
 const NA_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
@@ -1560,21 +1560,21 @@ const NA_SET_FORMS: &[CommandForm] = &[
 /// accepts (`P2`, 0-4) at the *same* wire width — see module docs' "GT, AGC's
 /// write/report domain mismatch" section (manual p.10).
 const GT_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `NL`'s two Set widths: the selector-only read (`NL0;`, 1 char) and the
 /// write width (`NL0<3-digit P2>;`, 4 chars — manual p.13).
 const NL_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 4),
 ];
 
 /// `RL`'s two Set widths: the selector-only read (`RL0;`, 1 char) and the
 /// write width (`RL0<2-digit P2>;`, 3 chars — manual p.15).
 const RL_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 3),
 ];
 
@@ -1583,7 +1583,7 @@ const RL_SET_FORMS: &[CommandForm] = &[
 /// widths as [`RL_SET_FORMS`], kept as its own named const per this table's
 /// one-const-per-command convention.
 const SH_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 3),
 ];
 
@@ -1591,7 +1591,7 @@ const SH_SET_FORMS: &[CommandForm] = &[
 /// item selector P2) and the write width (`CO0<P2><4-digit P3>;`, 6 chars —
 /// manual p.5). See module docs' "CO, a 4-item selector" section.
 const CO_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 2),
+    CommandForm::selector_read(2),
     CommandForm::fixed(CommandOperation::Set, 6),
 ];
 
@@ -1599,7 +1599,7 @@ const CO_SET_FORMS: &[CommandForm] = &[
 /// write width (`BP0<P2><3-digit P3>;`, 5 chars — manual p.5). Same shape as
 /// [`CO_SET_FORMS`], one fewer `P3` digit.
 const BP_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 2),
+    CommandForm::selector_read(2),
     CommandForm::fixed(CommandOperation::Set, 5),
 ];
 
@@ -1610,7 +1610,7 @@ const BP_SET_FORMS: &[CommandForm] = &[
 /// `1`=Parametric Mic EQ), not a fixed `"0"` byte — see module docs' "PR, a
 /// genuine manual heading typo" section.
 const PR_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
@@ -1621,7 +1621,7 @@ const PR_SET_FORMS: &[CommandForm] = &[
 /// byte — see module docs' "ML, the batch's only composite command"
 /// section.
 const ML_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 4),
 ];
 
@@ -1634,7 +1634,7 @@ const SET_6: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 6)];
 /// `1+6=7` (P1=1, time), `1+8=9` (P1=0, date) — manual p.6. See module docs'
 /// "DT" section for the full per-shape citation.
 const DT_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 6),
     CommandForm::fixed(CommandOperation::Set, 7),
     CommandForm::fixed(CommandOperation::Set, 9),
@@ -1644,19 +1644,19 @@ const DT_SET_FORMS: &[CommandForm] = &[
 /// write width (`OS0<P2>;`, 2 chars) — same "selector read" shape as
 /// [`CT_SET_FORMS`] (manual p.13).
 const OS_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `LM`'s two Set widths — same shape as [`OS_SET_FORMS`] (manual p.11).
 const LM_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 
 /// `PB`'s two Set widths — same shape as [`OS_SET_FORMS`] (manual p.14).
 const PB_SET_FORMS: &[CommandForm] = &[
-    CommandForm::fixed(CommandOperation::Set, 1),
+    CommandForm::selector_read(1),
     CommandForm::fixed(CommandOperation::Set, 2),
 ];
 

@@ -23,6 +23,11 @@ async-trait = "0.1"
 # Error handling
 thiserror = { workspace = true }
 
+# Profile file format (settings bundles applied together) — plain data
+# deserialization only, never wire-format serialization of protocol types.
+serde = { workspace = true }
+toml = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }

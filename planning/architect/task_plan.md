@@ -1783,3 +1783,255 @@ can run any time, including in parallel with the whole `ui` sequence.
 Not dispatched this session, per the architect's standing prohibition on
 writing code or dispatching subagents directly — this section records the
 design and queue for the coordinating session to dispatch from.
+
+## 12. Wave 5 — Profiles + network server mode (WSJT-X)
+
+User request (2026-07-25): (1) named "profiles" that apply a bundle of
+settings (mode, filter bandwidth, etc.) at once; (2) let WSJT-X control the
+radio over the network so one process can own the USB serial port instead
+of the CAT port being exclusively bound to whichever app has it open.
+
+### 12.1 Ground truth established this session (corrects a wrong premise)
+
+The user initially believed a "server mode" already existed (in this repo
+or `ts570d`) and just needed "a new port binding." Investigated both
+repos plus `radio-cat-rs` directly (`~/src/github.com/kf0uwv/radio-cat-rs`)
+and found:
+- **No server/network mode is wired into any application binary anywhere**
+  — not in `ft991a`, not in `ts570d`. `ts570d`'s own ADR 0005 is a
+  *readiness* ADR only ("No TCP or UDP transport is implemented in this
+  refactor").
+- The actual capability lives, fully implemented and tested but with zero
+  consumers, in three unused `radio-cat-rs` crates: `cat-transport-tcp`,
+  `cat-transport-udp`, `cat-server`. `cat-server` (`broker.rs`) implements
+  exactly the "one process owns the physical `CatSession`, many remote
+  clients share it" topology we want: a `BrokerWorker<C,S>` owns one
+  `Broker<C,S>` (which owns the physical session) exclusively and services
+  `Job`s off a queue in order; `BrokerHandle` (cheap `Rc`-clone) is what
+  every client-facing task holds to `submit(client_id, raw_wire_bytes) ->
+  Option<Vec<u8>>` and await its own reply, via hand-rolled `!Send`
+  `local_channel` primitives (no channel crate — matches this repo's
+  monoio/`!Send` discipline). `cat-server::build(session, table) ->
+  (BrokerWorker, BrokerHandle)`.
+- **`cat-server`'s wire protocol is custom, not Hamlib/rigctld**: TCP is a
+  4-byte-BE-length-prefixed frame of raw CAT bytes (e.g. `b"FA;"`); UDP is a
+  session-id+request-id envelope. WSJT-X's only network-rig option is
+  Hamlib's rigctld *text* protocol (`f`/`F <hz>`/`m`/`M <mode> <bw>`/
+  `t`/`T <0|1>`/`\dump_state`/...). Neither existing wire format is
+  something WSJT-X can speak; a translation layer must be built new.
+- Decision (user, 2026-07-25): build **both** — wire up the existing
+  `cat-server` raw TCP/UDP listeners (cheap; library code already exists,
+  tested, just needs socket binding + CLI plumbing) **and** a new
+  rigctld-compatible TCP listener for WSJT-X.
+
+### 12.2 Server mode design
+
+New workspace member crate **`server/`** (owned by the `app` agent's
+territory — it is wiring/CLI-adjacent, not radio protocol semantics or UI).
+Depends on `radio` (concretely — like `ui` does, this crate is contractually
+FT-991A-shaped, not radio-generic) plus the new `cat-server`/
+`cat-transport-tcp`/`cat-transport-udp` git deps from `radio-cat-rs`.
+
+**Why a new crate and not inline in `src/main.rs`**: per this repo's Rule 2
+(`radio` never imports a transport crate directly) and Rule 5 (`src/main.rs`
+is the wiring layer, not where logic lives), the broker-session adapter and
+the rigctld protocol translator are meaningfully-sized new logic, not just
+wiring — same reasoning that gave `ui` and `emulator` their own crates.
+
+**Topology** (headless, mutually exclusive with today's direct-serial+TUI
+mode — the OS only lets one process open `/dev/ttyUSB0` at a time, so
+`ft991a server` and plain `ft991a` are alternatives, not simultaneous):
+
+```
+ft991a server --port /dev/ttyUSB0 [--raw-tcp-port P] [--raw-udp-port P] [--rigctl-port P]
+  main.rs: SerialPort::open + SerialCatSession::new (unchanged from today)
+    -> server::run(session, ServerConfig { .. })
+         -> cat_server::build(session, &FT991A_COMMAND_TABLE) -> (worker, handle)
+         -> monoio::spawn(worker.run())
+         -> if raw_tcp_port: monoio::spawn(cat_server::tcp::serve(listener, handle.clone(), registry))
+         -> if raw_udp_port: monoio::spawn(cat_server::udp::serve(socket, handle.clone(), registry))
+         -> if rigctl_port:  monoio::spawn(rigctl::serve(listener, handle.clone()))
+```
+
+**Raw TCP/UDP**: thin wiring only — bind the socket(s) the user configured,
+call `cat_server::tcp::serve`/`udp::serve` directly. No new protocol code.
+Lets any future `radio-cat-rs`-aware client (a `ts570d`-style CLI, etc.)
+connect too, for cheap.
+
+**Rigctld bridge** (`server/src/rigctl.rs`): the key design point is *reuse,
+not reimplementation*, per the user's explicit instruction to "delegate to
+our existing control flow." A new `BrokerCatSession` (`server/src/
+broker_session.rs`) implements `cat_transport_core::CatSession` by
+submitting raw wire bytes through a `BrokerHandle` (`execute()` ->
+`handle.submit(client_id, request.to_vec())`, mapping the broker's `b"ERR
+..."` wire convention to `Err`, empty payload to `ResponseDisposition::
+NoResponse`, anything else to `ResponseWritten`). Its `Error` type is
+`cat_transport_core::TransportError` (using the existing `Other(String)`/
+timeout variants) specifically so it satisfies `Ft991a<S>`'s existing
+`S: CatSession<Error = TransportError>` bound — meaning `radio::Ft991a::
+new(BrokerCatSession::new(handle, client_id))` gives the rigctl layer a
+fully-featured typed client and the translator calls the *exact same*
+`get_vfo_a`/`set_vfo_a`/`get_mode`/`set_mode`/`transmit`/`receive`/
+`get_tx_state` methods the TUI calls, rather than hand-rolling FT-991A wire
+frames a second time. `radio` itself is untouched — `BrokerCatSession`
+lives in `server`, never in `radio`, per Rule 2.
+
+Rigctl command subset implemented (the commands WSJT-X's Hamlib "NET
+rigctl" backend actually issues): `f`/`F freq`, `m`/`M mode passband`,
+`t`/`T ptt`, `v`/`V vfo` (minimal), `\dump_state` (capability handshake
+Hamlib's client sends on connect — frequency range/mode list drawn from
+this crate's own `Frequency::MIN_HZ`/`MAX_HZ` and `Mode`, not invented
+numbers), `q`/`Q` to close the connection. Each command's `RadioResult`
+error maps to rigctld's `RPRT <negative errno-ish code>` convention on
+failure. **Flagged explicitly: this has not been validated against a real
+WSJT-X instance in this session** (no WSJT-X available in this sandbox) —
+the Hamlib dump_state field layout was implemented from protocol knowledge,
+not from an authoritative spec transcription the way `EX_MENU_TABLE` was
+built from the manual; treat it as a first cut to be validated/iterated
+against real WSJT-X, not as manual-cited ground truth.
+
+**Linux-only**: `cat-server` (and therefore `server`) only compiles where
+`monoio::net` exists — mirrors `cat-transport-serial`'s own Linux/Windows
+split, except no Windows backend exists for the *server* side at all (this
+is a fair scope cut: the "server owns the USB port" box is explicitly a
+Linux machine in the user's framing, and WSJT-X is the remote network
+client, typically on a different machine). Root `Cargo.toml` places `server`
+under `[target.'cfg(target_os = "linux")'.dependencies]` so `cargo check
+--target x86_64-pc-windows-gnu -p ft991a` (an existing, must-keep-green
+command) never tries to pull it in. `main.rs`'s `server` subcommand handling
+is itself `#[cfg(target_os = "linux")]`-gated, with a plain "Linux only"
+error on Windows if someone passes `server`.
+
+### 12.3 Profiles design
+
+Owned by `yaesu` (`radio/src/profile.rs` — settings *semantics*, same
+ownership logic as the rest of `radio`) with `ui`/`app` wiring on top,
+per user's answers: TOML files + UI menu action + CLI flag.
+
+- `radio/src/profile.rs`: `Profile` struct (all fields `Option<T>`, applying
+  only what's `Some`) — `mode: Option<Mode>`, `filter_width_index:
+  Option<u8>`, `narrow: Option<bool>`, `af_gain`/`rf_gain`/`squelch`/
+  `power_watts: Option<u8>`, `attenuator_on`/`noise_blanker_on`/
+  `contour_on`/`vox_on: Option<bool>`, `preamp_mode: Option<PreampMode>`,
+  `noise_blanker_level: Option<u8>`, plus `ex_menu: Vec<(u16, i32)>` for
+  arbitrary `EX` menu items (looked up by numeric `P1` or by
+  case-insensitive name against `EX_MENU_TABLE`, resolved at load time so
+  a bad name/number fails fast at parse, not at apply). Deserializes via a
+  private `RawProfile` (plain `serde`-derived struct: `Option<String>` for
+  `mode`/`preamp_mode`, `HashMap<String,i32>` for `ex_menu`), converted into
+  the typed `Profile` by hand — keeps `serde`/`toml` off `Mode`/
+  `PreampMode` themselves (small, local translation, not a wire-format
+  change to existing enums). New `radio` deps: `serde` (workspace dep,
+  already pinned, just unused until now), `toml` (new).
+- `Profile::load_from_file(path) -> Result<Profile, ProfileError>`,
+  `Profile::load_all_from_dir(dir) -> Vec<(String, Profile)>` (name = file
+  stem, errors per-file are collected, not fatal to the whole directory —
+  one bad profile file shouldn't hide the good ones from the UI list).
+  `Profile::apply(&self, radio: &mut impl Radio + Ft991aExtras) ->
+  RadioResult<()>` — applies mode before filter width (filter bandwidth
+  resolution is mode-family-dependent) then everything else in field order.
+- Default profile directory: platform config dir (`$XDG_CONFIG_HOME` or
+  `~/.config/ft991a/profiles/` on Linux; `%APPDATA%\ft991a\profiles\` on
+  Windows) — a small local helper, not a new `dirs`-crate dependency.
+- `ui`: new top-level quick-access key from `ControlState::Menu` (same
+  "escape hatch alongside the 12 groups" shape as the `EX` number-entry
+  key, not a 13th `CommandGroup` — profiles aren't a command family, they're
+  a cross-cutting bulk-apply action), entering a new `ControlState::
+  ProfileList { profiles: Vec<(String, Profile)>, cursor, error: Option<
+  String> }` populated by `Profile::load_all_from_dir` at entry time.
+  `Enter` -> `KeyResult::Execute(ExecuteAction::ApplyProfile(index))`;
+  `terminal.rs`'s `execute_action` calls `Profile::apply` against the live
+  `radio` value, same pattern every other `ExecuteAction` arm already
+  follows.
+- `main.rs`: new `--profile <name>` flag, applied once after connecting,
+  before `ui::run` (or before `server::run`, so a profile can also seed a
+  headless server's starting state) — looks the name up in the default
+  profile directory, same `Profile::load_from_file` + `apply` used by the
+  UI action.
+
+### 12.4 Bug found and fixed during live verification: selector-read commands silently dropped over the network
+
+Live-tested `server` mode against the PTY-hosted `emulator` (not simulated —
+a real running `ft991a server` process talking to a real running
+`emulator` process over an actual PTY). Frequency (`FA`/`FB`) and PTT
+(`TX`) round-tripped correctly on the first try. Mode (`MD`) did not:
+`get_mode()` over the network always failed, even though the emulator's own
+log showed it received `MD0;` and correctly answered `MD02;` every time —
+the answer was being generated and then silently discarded somewhere
+between the physical session and the broker.
+
+Root cause, confirmed by reading `cat-server::Broker::dispatch` (in
+`radio-cat-rs`, the shared dependency, not this repo): `MD`/`EX` (and, it
+turned out, ~23 other FT-991A commands — see below) use the "selector
+read" pattern this repo's own module docs already name (a required
+selector parameter with no zero-width query form to express it, so the
+read is structurally indistinguishable from a `Set` to `cat-framework`'s
+generic parser — e.g. `MD0;`, 1-byte param, vs. `MD01;`, 2-byte param). A
+radio's own `handle_command` disambiguates this fine, by parameter length.
+But `cat-server`'s generic broker has no such per-command knowledge — it
+only had the coarse `readable`/`writable` **command-level** flags to route
+by, and picked "route Set-shaped requests to the writable path whenever
+`writable` is `true`" — which is wrong the moment a command is **both**
+readable and writable via this pattern (true for `MD`/`EX`/`CT`/`CN`/`IS`/
+`KM`/`RA`/`PA`/`NB`/`NR`/`BC`/`NA`/`GT`/`NL`/`RL`/`SH`/`CO`/`BP`/`PR`/`ML`/
+`DT`/`OS`/`LM`/`PB`/`MT` — 25 of this repo's own commands), since *every*
+width of the same command is structurally `Set` and the flags don't vary
+by width. The narrower (read) width got routed to a fire-and-forget
+`client.set()` write, which discards whatever response arrives — this is
+also what caused the earlier apparent "responses arrive one request late"
+symptom during ad hoc testing: the real answer never got consumed by the
+broker, so it sat unread in the physical transport's buffer until some
+*later*, unrelated request's read happened to pick it up.
+
+This is a real bug in the shared `radio-cat-rs` library, not in anything
+built for this repo this session — confirmed by reading `Broker::dispatch`
+directly and reproducing the exact failure against the live emulator both
+before and after the fix. Direct/local TUI mode is entirely unaffected (it
+never goes through this broker). Fixed upstream, with the user's explicit
+go-ahead (2026-07-25):
+
+- `cat-framework::CommandForm` gained a new `is_selector_read: bool` field
+  (`false` via the existing `fixed`/`variable` constructors, `true` via a
+  new `selector_read(len)` constructor) and `CommandDefinition` gained
+  `is_selector_read(param_len) -> bool`, checking whether the *specific
+  matched width* is tagged as a read — additive only, no existing
+  construction site (this repo, `ts570d`, or `cat-server`'s own tests, all
+  verified to only ever call `fixed`/`variable`, never a struct literal)
+  needed to change.
+- `cat-server::Broker::dispatch` now checks `definition.is_selector_read
+  (params.len())` first, before falling back to the coarse `readable`/
+  `writable` flags — exact for every existing command table, since
+  `is_selector_read` is `false` for every pre-existing form.
+- This repo's `radio/src/ft991a_radio.rs`: the read-shaped entry in all 25
+  affected `*_SET_FORMS` constants (identified from those constants' own
+  doc comments, each of which already named its selector-read width
+  explicitly) changed from `CommandForm::fixed(CommandOperation::Set, N)`
+  to `CommandForm::selector_read(N)` — a data-only change; `parse()`'s
+  structural classification, `handle_command`'s own width-based
+  disambiguation, and every existing test are all unaffected.
+- Verified: `radio-cat-rs`'s full workspace test suite (all 6 crates, 127
+  tests total, including 2 new regression tests reproducing this exact
+  bug shape) passes; this repo's full workspace test suite (1007 tests)
+  passes; `cargo clippy --workspace --all-targets -D warnings` clean in
+  both repos; `cargo check --target x86_64-pc-windows-gnu -p ft991a` still
+  green; re-ran the live emulator smoke test after the fix — `MD0;`,
+  `EX060;`, and the rigctl `m`/`M` commands all now return correct
+  responses over the network.
+- **Committed and pushed** to `github.com/kf0uwv/radio-cat-rs`'s `main`
+  branch at commit `889591b` (user approved both the fix and the push,
+  2026-07-25). This repo's root `Cargo.toml` picks it up as a plain
+  `branch = "main"` git dependency update (`cargo build`/`test`/`clippy`
+  all re-verified afterward against the real pushed commit, not a local
+  `[patch]` — none was left in place). `ts570d` was not touched and does
+  not use this new constructor anywhere, so it is unaffected either way;
+  its own `SM`/`RM` (read-only, never writable) never hit this bug in the
+  first place.
+
+### 12.5 Dispatch (this session, single coordinating agent, no subagent fan-out)
+
+Implemented directly rather than dispatched, per the user's direct request
+and session scale — no multi-agent workflow was requested. Order: (1)
+`radio/src/profile.rs` + `Cargo.toml` dep additions, (2) `ui` wiring, (3)
+`main.rs` `--profile` flag, (4) new `server` crate (broker session, rigctl,
+raw TCP/UDP wiring), (5) `main.rs` `server` subcommand, (6) tests +
+`cargo build --workspace` / `clippy` / `fmt` across all touched crates.

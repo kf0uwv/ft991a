@@ -1,0 +1,52 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Network server mode: one process owns the physical serial port, exposed to WSJT-X and other remote clients over TCP/UDP."
+rust-version.workspace = true
+
+# Linux-only. `cat-server` (the request broker this crate wires up) only
+# depends on `monoio` under `cfg(target_os = "linux")` — its `src/tcp.rs`/
+# `src/udp.rs` import `monoio::net` unconditionally in source, so the crate
+# fails to compile at all on a target where that dependency isn't pulled
+# in. This crate's own concurrency (accept loops, `monoio::spawn`) has the
+# exact same shape, so it is Linux-only for the same reason, not gated
+# out of caution. See `planning/architect/task_plan.md` §12.2. The root
+# `Cargo.toml` only depends on this crate from the `ft991a` binary under
+# `cfg(target_os = "linux")`, so `cargo check --target
+# x86_64-pc-windows-gnu -p ft991a` never tries to build it.
+
+[dependencies]
+# FT-991A command table + client + domain types — this crate is
+# contractually FT-991A-shaped (like `ui`), not radio-generic: the rigctld
+# translator calls `radio::Ft991a`'s typed methods directly.
+radio = { path = "../radio" }
+
+# Generic CAT engine + client mechanics.
+cat-framework = { workspace = true }
+cat-client = { workspace = true }
+cat-transport-core = { workspace = true }
+
+# The request broker + raw TCP/UDP listeners this crate wires up.
+cat-server = { workspace = true }
+
+# Async runtime — Linux-only, see the crate-level doc comment above.
+monoio = { workspace = true }
+
+# Async traits (compatible with !Send futures for monoio).
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# `futures::future::select_all` — waiting on the first of several listener
+# tasks to end (`lib.rs::run`).
+futures = { workspace = true }
+
+[features]
+default = []

@@ -7,7 +7,13 @@
 #
 # `emulator` added in Wave 2 per `planning/architect/task_plan.md` §7 — see
 # `planning/emulator/task_plan.md` for that crate's design.
-members = ["radio", "ui", "emulator"]
+#
+# `server` added in Wave 5 per `planning/architect/task_plan.md` §12 — the
+# network server mode (raw `cat-server` TCP/UDP + a new rigctld-compatible
+# TCP listener for WSJT-X). Linux-only (see that crate's own Cargo.toml
+# doc comment) — the `ft991a` binary only depends on it under
+# `cfg(target_os = "linux")`, so it never affects the Windows cross-check.
+members = ["radio", "ui", "emulator", "server"]
 resolver = "2"
 
 [workspace.package]
@@ -39,6 +45,8 @@ thiserror = "1.0.61"
 # Serialization (for radio commands/protocols)
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.117"
+# Profile file format (radio/src/profile.rs) — human-editable settings bundles.
+toml = "0.8.19"
 
 # Logging
 tracing = "0.1.40"
@@ -64,6 +72,11 @@ cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main
 cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+# Server mode only (Wave 5, `server` crate) — the request broker + raw
+# TCP/UDP listeners. Linux-only, per `cat-server`'s own Cargo.toml.
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 [package]
 name = "ft991a"
@@ -118,6 +131,14 @@ debug = true
 # dependency exactly.
 monoio = { workspace = true }
 # libc is already included above, unconditionally (portable itself)
+
+# Server mode (Wave 5, §12.2) — Linux-only (see `server/Cargo.toml`'s own
+# doc comment), so this is gated here rather than in the unconditional
+# `[dependencies]` above: `cargo check --target x86_64-pc-windows-gnu -p
+# ft991a` (an existing, must-keep-green command) must never try to pull it
+# in. `main.rs`'s `server` subcommand handling is itself
+# `#[cfg(target_os = "linux")]`-gated to match.
+server = { path = "server" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Test-only monoio usage (#[monoio::main]-driven smoke tests, if any land

@@ -17,6 +17,26 @@
   (`cargo check --target x86_64-pc-windows-gnu -p ft991a`), riding on
   `radio-cat-rs`'s native Win32 COM serial backend and a hand-rolled
   Windows entry point (`#[monoio::main]` doesn't exist there).
+- `radio::Profile` (`--profile <name>` CLI flag, `[L]` in-UI menu action)
+  applies a named bundle of settings (mode, filter bandwidth, gain,
+  attenuator, `EX` menu items, ...) from a TOML file in one shot — see
+  `planning/architect/task_plan.md` §12.3.
+- `server` (new workspace crate, Linux-only) is a headless network server
+  mode (`ft991a server --port <dev> --rigctl-port <n> [--raw-tcp-port <n>]
+  [--raw-udp-port <n>]`): one process owns the physical serial port,
+  shared by `radio-cat-rs`'s `cat-server` request broker with a new
+  Hamlib rigctld-compatible TCP listener for WSJT-X's "Hamlib NET rigctl"
+  rig type, plus the existing raw `cat-server` TCP/UDP protocols for other
+  `radio-cat-rs`-aware clients. Verified end-to-end against the live
+  `emulator` — see `planning/architect/task_plan.md` §12.2/§12.4. The
+  rigctld command translation (§12.2) has not been validated against a
+  real WSJT-X instance; treat it as a first cut.
+  **`radio-cat-rs` bug found and fixed during this verification** (§12.4):
+  `cat-server`'s broker silently dropped the response to any "selector
+  read" command (`MD`, the whole `EX` menu, and ~23 others) that is also
+  writable — fixed upstream via a new `CommandForm::selector_read`
+  marker (`radio-cat-rs@889591b`, pushed to `main`) and picked up here as
+  a plain `branch = "main"` git dependency update, no `[patch]` needed.
 
 See `docs/adr/0001-second-radio-on-shared-cat-framework.md` and
 `docs/adr/0002-rts-dtr-ptt-cw-keying.md` for the design record, and

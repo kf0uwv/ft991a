@@ -120,6 +120,7 @@
 
 pub mod ft991a;
 pub mod ft991a_radio;
+pub mod profile;
 pub mod radio_trait;
 
 pub use ft991a::Ft991a;
@@ -131,6 +132,7 @@ pub use ft991a_radio::{
     CTCSS_TONES_DECIHZ, DCS_CODES, EX_MENU_TABLE, FT991A_COMMAND_TABLE, FT991A_ID,
     SH_BANDWIDTH_TABLE,
 };
+pub use profile::{default_profile_dir, FailedProfiles, LoadedProfiles, Profile, ProfileError};
 pub use radio_trait::{
     AgcMode, Band, CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Meter, Mode,
     NopRadio, PreampMode, Radio, RadioError, RadioIndicator, RadioResult, RepeaterShift, ScanState,

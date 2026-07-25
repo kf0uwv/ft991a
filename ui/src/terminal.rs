@@ -45,8 +45,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use radio::{
-    CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Radio, RadioResult,
-    TaggedMemoryChannel,
+    CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Radio, RadioError,
+    RadioResult, TaggedMemoryChannel,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
@@ -756,6 +756,25 @@ async fn execute_action<R: Radio + Ft991aExtras + CwKeying>(
             "EX menu item set",
             ok_unit(radio.set_ex_menu_item(p1, value).await),
         ),
+
+        // --- Profiles (§12.3) ---
+        ExecuteAction::ApplyProfile(name, profile) => {
+            let r = profile.apply(radio).await;
+            (
+                "Profile applied",
+                match r {
+                    Ok(()) => Ok(format!("Applied profile '{name}'")),
+                    // `Profile::apply` only ever produces
+                    // `ProfileError::Radio` — every other variant is a
+                    // parse/load-time failure, already ruled out by the
+                    // time `ProfileList` holds an already-parsed `Profile`.
+                    // Kept as a fallback (not `unreachable!()`) rather than
+                    // asserted away, since nothing enforces it structurally.
+                    Err(radio::ProfileError::Radio(e)) => Err(e),
+                    Err(other) => Err(RadioError::InvalidProtocolString(other.to_string())),
+                },
+            )
+        }
     }
 }
 
@@ -1374,5 +1393,47 @@ mod tests {
         assert_eq!(desc, "EX menu item set");
         assert!(exec_result.is_ok());
         assert_eq!(radio.ex_menu_calls, vec![(1, 100)]);
+    }
+
+    // --- Profiles (§12.3) ---
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_apply_profile_dispatches_ex_menu_items() {
+        let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
+        let profile = radio::Profile {
+            ex_menu: vec![(60, 2)],
+            ..Default::default()
+        };
+        let (desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ApplyProfile("test".to_string(), profile),
+            &mut display,
+        )
+        .await;
+        assert_eq!(desc, "Profile applied");
+        assert_eq!(result.unwrap(), "Applied profile 'test'");
+        assert_eq!(radio.ex_menu_calls, vec![(60, 2)]);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_execute_action_apply_profile_propagates_radio_error() {
+        // `MockRadio` leaves `set_mode` at its `Radio` trait default
+        // (`NotImplemented`) — exercises `ApplyProfile`'s error path
+        // (`ProfileError::Radio(e) => Err(e)`) without needing a dedicated
+        // failing-mode fixture.
+        let mut radio = MockRadio::ok();
+        let mut display = Ft991aDisplay::default();
+        let profile = radio::Profile {
+            mode: Some(Mode::Usb),
+            ..Default::default()
+        };
+        let (_desc, result) = execute_action(
+            &mut radio,
+            ExecuteAction::ApplyProfile("test".to_string(), profile),
+            &mut display,
+        )
+        .await;
+        assert!(matches!(result, Err(RadioError::NotImplemented)));
     }
 }
