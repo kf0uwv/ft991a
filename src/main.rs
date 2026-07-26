@@ -199,10 +199,10 @@ async fn apply_named_profile<R: radio::Radio + radio::Ft991aExtras>(radio: &mut 
 }
 
 /// Command-line arguments specific to `ft991a server ...`
-/// (`planning/architect/task_plan.md` §12.2). Still Linux-only — see
-/// [`run_server_mode`]'s doc comment for why `radio-cat-rs` ADR 0006 did
-/// NOT lift this particular gate (unlike `--server`/[`run_over_tcp`]).
-#[cfg(target_os = "linux")]
+/// (`planning/architect/task_plan.md` §12.2). Cross-platform since
+/// `radio-cat-rs` docs/adr/0006-windows-network-transport.md's 2026-07-26
+/// amendment gave `cat-rigctl` a real Windows backend — see
+/// [`run_server_mode`]'s doc comment.
 struct ServerArgs {
     port: String,
     baud: u32,
@@ -212,7 +212,6 @@ struct ServerArgs {
     rigctl_port: Option<u16>,
 }
 
-#[cfg(target_os = "linux")]
 fn server_usage_exit() -> ! {
     eprintln!(
         "Usage: ft991a server --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]\n\
@@ -233,7 +232,6 @@ fn server_usage_exit() -> ! {
 /// Parse `ft991a server`'s own flags from `std::env::args()`, skipping both
 /// the program name and the `server` subcommand word itself (positions 0
 /// and 1).
-#[cfg(target_os = "linux")]
 fn parse_server_args() -> ServerArgs {
     let mut args_iter = std::env::args().skip(2);
     let mut port: Option<String> = None;
@@ -338,22 +336,11 @@ fn parse_server_args() -> ServerArgs {
 /// listener) and/or other `radio-cat-rs`-aware clients (via the existing
 /// raw `cat-server` TCP/UDP listeners), instead of running the local TUI.
 ///
-/// Still Linux-only, even after `radio-cat-rs` ADR 0006 gave
-/// `cat-transport-tcp`/`cat-transport-udp`/`cat-server` real Windows
-/// backends: this crate's actual bottleneck is `cat-rigctl` (the rigctld
-/// bridge + listener orchestration `server::run` wraps), whose own
-/// `src/lib.rs`/`src/rigctl.rs` import `monoio::net`/call `monoio::spawn`
-/// **unconditionally in source**, with no `windows.rs`-shaped counterpart
-/// and no `#[cfg(target_os = "linux")]` gate of its own — confirmed by
-/// `cargo check --target x86_64-pc-windows-gnu -p cat-rigctl` failing with
-/// unresolved-crate errors on every such call site. ADR 0006 explicitly
-/// scoped its Windows work to `cat-transport-tcp`/`cat-transport-udp`/
-/// `cat-server` only; `cat-rigctl` (built on top of `cat-server`, per
-/// `cat-rigctl/Cargo.toml`'s own doc comment) was not part of it. The root
-/// `Cargo.toml` therefore still only depends on `server` under
-/// `cfg(target_os = "linux")`, so this function's Windows counterpart below
-/// never touches that crate at all. Lifting this gate for real is a
-/// `radio-cat-rs`/`cat-rigctl` follow-on, out of this repo's own scope.
+/// Cross-platform since `radio-cat-rs` docs/adr/0006-windows-network-
+/// transport.md's 2026-07-26 amendment gave `cat-rigctl` a real Windows
+/// backend, closing the gap that previously kept this Linux-only even
+/// after `cat-transport-tcp`/`cat-transport-udp`/`cat-server` themselves
+/// became cross-platform (see that amendment for the full history).
 #[cfg(target_os = "linux")]
 async fn run_server_mode() {
     let args = parse_server_args();
@@ -386,13 +373,47 @@ async fn run_server_mode() {
     }
 }
 
-/// Windows has no server-mode backend at all (see [`run_server_mode`]'s doc
-/// comment) — `ft991a server ...` fails fast with a clear message rather
-/// than silently behaving like plain `ft991a`.
-#[cfg(not(target_os = "linux"))]
+/// Windows counterpart of the Linux [`run_server_mode`] above — same
+/// behavior (same `ServerArgs`, same listeners, same rigctld/WSJT-X
+/// support), identical up to `server::run` itself being a plain blocking
+/// `fn` on Windows rather than `async fn` (`cat_rigctl::run` is
+/// `#[cfg]`-selected the same way, since `#[monoio::main]` cannot exist on
+/// Windows). Kept as an `async fn` purely so the call site in [`run_app`]
+/// (`run_server_mode().await`) needs no platform branching of its own —
+/// this function has no real `.await` point, and calling `server::run`
+/// synchronously here simply blocks this thread until a listener fails,
+/// which is this entry point's entire job (nothing else runs concurrently
+/// in `ft991a server` mode).
+#[cfg(target_os = "windows")]
 async fn run_server_mode() {
-    eprintln!("error: `ft991a server` is only available on Linux");
-    std::process::exit(1);
+    let args = parse_server_args();
+
+    let port = SerialPort::open(
+        &args.port,
+        SerialConfig {
+            baud_rate: args.baud,
+            stop_bits: args.stop_bits,
+            ..SerialConfig::default()
+        },
+    )
+    .expect("serial open failed");
+
+    info!(
+        "Serial port opened (server mode): {} @ {} baud {} stop bit(s)",
+        args.port, args.baud, args.stop_bits
+    );
+
+    let session = SerialCatSession::new(port);
+    let config = server::ServerConfig {
+        raw_tcp_port: args.raw_tcp_port,
+        raw_udp_port: args.raw_udp_port,
+        rigctl_port: args.rigctl_port,
+    };
+
+    if let Err(e) = server::run(session, config) {
+        eprintln!("Server error: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// The actual application logic, shared by both platform entry points below:

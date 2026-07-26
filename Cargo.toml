@@ -155,6 +155,15 @@ async-trait = { workspace = true }
 radio = { path = "radio" }
 ui = { path = "ui" }
 
+# Server mode (Wave 5, §12.2). Used unconditionally (Windows-buildable) as
+# of `radio-cat-rs` docs/adr/0006-windows-network-transport.md's 2026-07-26
+# amendment: `cat-rigctl` (which `server` wraps) gained a real Windows
+# backend, closing the one remaining gap that previously kept this crate
+# Linux-only even after `cat-transport-tcp`/`cat-transport-udp`/`cat-server`
+# themselves became cross-platform. `main.rs`'s `server` subcommand handling
+# is no longer platform-gated to match.
+server = { path = "server" }
+
 [dev-dependencies]
 emulator = { path = "emulator" }
 radio = { path = "radio" }
@@ -179,23 +188,6 @@ debug = true
 # dependency exactly.
 monoio = { workspace = true }
 # libc is already included above, unconditionally (portable itself)
-
-# Server mode (Wave 5, §12.2) — still Linux-only even after `radio-cat-rs`
-# ADR 0006 gave `cat-transport-tcp`/`cat-transport-udp`/`cat-server` real
-# Windows backends: this crate's actual bottleneck is `cat-rigctl` (which
-# `server` wraps), whose own listener orchestration imports `monoio::net`/
-# calls `monoio::spawn` unconditionally in source with no Windows
-# counterpart of its own — ADR 0006 scoped its Windows work to
-# `cat-transport-tcp`/`cat-transport-udp`/`cat-server` only, not the
-# `cat-rigctl` layer on top of them (confirmed: `cargo check --target
-# x86_64-pc-windows-gnu -p cat-rigctl` fails). So this is gated here rather
-# than in the unconditional `[dependencies]` above: `cargo check --target
-# x86_64-pc-windows-gnu -p ft991a` (an existing, must-keep-green command)
-# must never try to pull it in. `main.rs`'s `server` subcommand handling is
-# itself `#[cfg(target_os = "linux")]`-gated to match. See
-# `server/src/lib.rs`'s doc comment and `run_server_mode`'s doc comment in
-# `main.rs` for the same finding in more detail.
-server = { path = "server" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Test-only monoio usage (#[monoio::main]-driven smoke tests, if any land

@@ -7,26 +7,16 @@ license.workspace = true
 description = "Network server mode: one process owns the physical serial port, exposed to WSJT-X and other remote clients over TCP/UDP."
 rust-version.workspace = true
 
-# Linux-only. As of `radio-cat-rs` ADR 0006, `cat-server` itself (the
-# request broker) DOES compile on Windows (its `src/tcp.rs`/`src/udp.rs`
-# are now `#[cfg(target_os = "linux")]`-gated, with `tcp_windows.rs`/
-# `udp_windows.rs`/`worker_windows.rs` providing the Windows-side
-# equivalent). This crate's actual remaining bottleneck is `cat-rigctl`
-# (the rigctld bridge + listener orchestration this crate's `run()` wraps
-# via `cat_rigctl::run`): its own `src/lib.rs`/`src/rigctl.rs` import
-# `monoio::net`/call `monoio::spawn` unconditionally in source, with no
-# `cfg(target_os = "linux")` gate and no Windows counterpart at all —
-# confirmed via `cargo check --target x86_64-pc-windows-gnu -p cat-rigctl`
-# failing with unresolved-crate errors. ADR 0006 explicitly scoped its
-# Windows work to `cat-transport-tcp`/`cat-transport-udp`/`cat-server`
-# only, not the `cat-rigctl` layer built on top of them. This crate's own
-# concurrency (`#[monoio::test]`s) has the same Linux-only shape for the
-# same underlying reason. See `planning/architect/task_plan.md` §12.2. The
-# root `Cargo.toml` only depends on this crate from the `ft991a` binary
-# under `cfg(target_os = "linux")`, so `cargo check --target
-# x86_64-pc-windows-gnu -p ft991a` never tries to build it. Lifting this
-# gate for real is a `radio-cat-rs`/`cat-rigctl` follow-on, out of this
-# repo's own scope.
+# Cross-platform since `radio-cat-rs` docs/adr/0006-windows-network-
+# transport.md's 2026-07-26 amendment: `cat-rigctl` (the rigctld bridge +
+# listener orchestration this crate's `run()` wraps via `cat_rigctl::run`)
+# gained a real Windows backend (`std::net` + genuine OS threads, mirroring
+# `cat-server`'s own), closing the gap that previously kept this crate
+# Linux-only even after `cat-transport-tcp`/`cat-transport-udp`/
+# `cat-server` themselves became cross-platform. `run()` below is
+# `#[cfg]`-selected per platform to match `cat_rigctl::run`'s own split
+# (`async fn` on Linux, a plain blocking `fn` on Windows, since
+# `#[monoio::main]` cannot exist there).
 
 [dependencies]
 # FT-991A command table + client + domain types — this crate is
@@ -46,13 +36,16 @@ cat-transport-core = { workspace = true }
 # doc comment for why a wrapper is needed) and a thin `run()` wrapper.
 cat-rigctl = { workspace = true }
 
-# Async runtime — Linux-only, see the crate-level doc comment above.
-# Named directly for `#[monoio::test]` in this crate's own unit tests.
-monoio = { workspace = true }
-
 # Async traits (compatible with !Send futures for monoio) — `Ft991aRigctl`'s
 # `impl RigctlRadio` is `#[async_trait(?Send)]`.
 async-trait = { workspace = true }
 
 [features]
 default = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Async runtime (io_uring-based, Linux-only) — named directly for
+# `#[monoio::test]` in this crate's own unit tests, which only exercise the
+# Linux `run()` (an `async fn`); the Windows `run()` is a plain blocking
+# `fn` with no `monoio` dependency of its own.
+monoio = { workspace = true }

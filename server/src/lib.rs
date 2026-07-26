@@ -28,12 +28,13 @@
 //! and listener orchestration/error propagation — lives in
 //! `cat-server`/`cat-rigctl`, shared with `ts570d`.
 //!
-//! Linux-only, mirroring `cat-rigctl`'s own scope (see this crate's
-//! `Cargo.toml` doc comment for the exact reason this remains true even
-//! after `radio-cat-rs` ADR 0006 gave `cat-server` itself a Windows
-//! backend — the bottleneck is `cat-rigctl`, not `cat-server`) — the
-//! `ft991a` binary only depends on this crate under
-//! `cfg(target_os = "linux")`.
+//! Cross-platform since `radio-cat-rs` docs/adr/0006-windows-network-
+//! transport.md's 2026-07-26 amendment gave `cat-rigctl` a real Windows
+//! backend — [`run`] is `#[cfg]`-selected per platform to match
+//! `cat_rigctl::run`'s own split (`async fn` on Linux, a plain blocking
+//! `fn` on Windows, since `#[monoio::main]` cannot exist there); a caller
+//! (`main.rs`) sees one `run` either way and needs no platform branching
+//! of its own beyond `.await`ing it only on Linux.
 
 mod rigctl_radio;
 
@@ -49,6 +50,7 @@ pub use cat_rigctl::ServerConfig;
 /// FT-991A-shaped (it names `radio::FT991A_COMMAND_TABLE`/`radio::Ft991a`
 /// directly, exactly like `ui` does for the UI-facing traits), not
 /// radio-generic.
+#[cfg(target_os = "linux")]
 pub async fn run<S>(session: S, config: ServerConfig) -> std::io::Result<()>
 where
     S: cat_transport_core::CatSession + 'static,
@@ -60,7 +62,28 @@ where
     .await
 }
 
-#[cfg(test)]
+/// Windows implementation of [`run`] — same behavior as the Linux one
+/// (same [`ServerConfig`], same listeners, same rigctld/WSJT-X support),
+/// but a plain blocking `fn`: `cat_rigctl::run` itself is a plain `fn` on
+/// Windows (genuine OS threads instead of `monoio`'s cooperative tasks),
+/// so there is nothing to `.await` here at all.
+#[cfg(target_os = "windows")]
+pub fn run<S>(session: S, config: ServerConfig) -> std::io::Result<()>
+where
+    S: cat_transport_core::CatSession + Send + 'static,
+    S::Error: std::error::Error + 'static,
+{
+    cat_rigctl::run(session, &radio::FT991A_COMMAND_TABLE, config, |s| {
+        Ft991aRigctl::new(radio::Ft991a::new(s))
+    })
+}
+
+// Gated to Linux: exercises the `async fn run` implementation via
+// `#[monoio::test]`. The Windows `run` is a thin, low-risk wrapper over
+// `cat_rigctl::run`'s own Windows implementation, which has its own test
+// coverage in `radio-cat-rs` (`rigctl_windows`'s tests) — see that crate's
+// docs/adr/0006-windows-network-transport.md amendment.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use cat_transport_core::test_support::ScriptedCatSession;
