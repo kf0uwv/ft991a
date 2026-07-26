@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --workspace --lib
+
+      - name: Integration tests
+        # Requires /dev/pts (ptmx) and io_uring (kernel 5.1+).
+        # ubuntu-latest runs kernel 6.x so both are available.
+        run: cargo test --test integration
+
+  windows-check:
+    name: Windows cross-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-windows-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-
+            ${{ runner.os }}-cargo-
+
+      - name: Windows cross-check (type-check only)
+        # Mirrors CLAUDE.md's documented command exactly. `server` is
+        # deliberately NOT included here -- it is genuinely not
+        # Windows-buildable yet (its cat-rigctl dependency has no Windows
+        # backend upstream in radio-cat-rs -- see
+        # docs/adr/0003-consume-radio-cat-rs-windows-network-transport.md)
+        # and the root Cargo.toml only pulls it in for the `ft991a` binary
+        # under `cfg(target_os = "linux")`, so this command never touches
+        # it anyway.
+        run: cargo check --target x86_64-pc-windows-gnu -p ft991a

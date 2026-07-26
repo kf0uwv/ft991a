@@ -1,0 +1,14 @@
+name: Release
+on:
+  release:
+    types: [published]
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: kf0uwv/radio-cat-rs/.github/workflows/release-app.yml@main
+    with:
+      app_name: "ft991a-radio-control"
+      main_binary: "ft991a"
+      extra_binaries: "emulator cat-transport-serial:pin-test"
+      apt_packages: "libudev-dev"

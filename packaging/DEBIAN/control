@@ -1,0 +1,20 @@
+Package: ft991a-radio-control
+Version: 0.0.1
+Architecture: amd64
+Maintainer: Matt Franklin <radiombf@gmail.com>
+Section: hamradio
+Priority: optional
+Depends: libc6 (>= 2.17)
+License: Apache-2.0
+Description: Yaesu FT-991A terminal radio control
+ Terminal-based CAT control for the Yaesu FT-991A HF/VHF/UHF transceiver.
+ Uses io_uring for low-latency serial I/O and ratatui for the TUI.
+ .
+ Includes:
+  - ft991a-control: main control application (also supports a headless
+    network server mode and a remote TCP client mode)
+  - ft991a-emulator: virtual radio emulator (PTY-based, no hardware needed)
+  - rs232c-pintest: RS-232C wiring/pin diagnostic tool
+ .
+ Requires Linux kernel 5.1+ for io_uring support.
+Homepage: https://github.com/kf0uwv/ft991a
