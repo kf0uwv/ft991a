@@ -195,4 +195,98 @@ Judgment calls:
   not achievable without a redesign of its transport, which the task
   explicitly frames as optional/out-of-scope for this pass.
 
+## Wave 4 Task — complete (TCP client mode, `--server` flag, 2026-07-25)
+
+Deliverables:
+- Root `Cargo.toml`: `cat-transport-core`/`cat-transport-tcp`/`async-trait`
+  added to the existing `[target.'cfg(target_os = "linux")'.dependencies]`
+  table (merged with `server`'s own entry there — do not create a second
+  `[target...]` table of the same key, TOML rejects the duplicate).
+- `src/main.rs`: `Args.port` → `Option<String>`, new `Args.server:
+  Option<String>`; `parse_args()` gained `--server <host:port>` plus a
+  mutual-exclusivity/at-least-one-required check on `(port, server)`.
+  Split the old inline `run_app()` tail into `run_over_serial(&Args)`
+  (unchanged serial path) and `run_over_tcp(&Args, addr)` (new —
+  `#[cfg(target_os = "linux")]` real impl using `TcpCatSession::connect` +
+  a new `TcpClientSession` adapter, `#[cfg(not(target_os = "linux"))]`
+  stub that errors and exits, mirroring `run_server_mode`'s existing
+  dual-definition pattern exactly). New `TcpClientSession` (Linux-only)
+  implements `CatSession<Error = TransportError>` (mapping
+  `TcpSessionError` → `TransportError`, same shape as `server/src/
+  broker_session.rs::BrokerCatSession`) and `ModemControlLines` (every
+  method returns an honest "not available over TCP" error — required so
+  `Ft991a<TcpClientSession>` satisfies `ui::run`'s unconditional
+  `CwKeying` bound; see `task_plan.md`'s blocker writeup for why).
+
+Verification (all green):
+- `cargo build --workspace`, `cargo test --workspace` (434 `ui` unit
+  tests unaffected + full workspace), `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --check`.
+- `cargo check --target x86_64-pc-windows-gnu -p ft991a` — confirmed the
+  Linux-only gating actually keeps Windows green (this was the whole
+  point of gating rather than adding these deps unconditionally).
+- Real end-to-end run, not just compile-checked: `ft991a server --port
+  <emulator-pty> --raw-tcp-port 4533` in one process, `ft991a --server
+  127.0.0.1:4533` in a tmux-wrapped second process (via the `run` skill's
+  TUI pattern) — confirmed live radio state displayed (VFO A/B, mode,
+  S-meter, PWR, "No errors" panel) pulled over the TCP hop, then drove an
+  actual VFO A frequency change (`F` → `14250000` → Enter) through the
+  full stack (TUI → `TcpClientSession` → `cat-server` raw TCP listener →
+  broker → emulator) and watched it land, before quitting cleanly (`q`
+  `q`) and confirming the process exited (no lingering `--server`
+  process).
+
 No commits made.
+
+## `server` crate migration onto `cat_server::BrokerCatSession`/`cat-rigctl` (2026-07-26)
+
+Files changed:
+- `.cargo/config.toml` (new, untracked, never committed) — local `[patch]`
+  block pointing every `radio-cat-rs`-sourced crate at the local checkout
+  (commit `36f783d`, not yet pushed).
+- `Cargo.toml` — added `cat-rigctl` to `[workspace.dependencies]`.
+- `server/Cargo.toml` — added `cat-rigctl`; removed now-unused
+  `cat-framework`/`cat-client`/`cat-server` (direct)/`thiserror`/
+  `tracing`/`futures`.
+- `server/src/broker_session.rs` — deleted (moved verbatim into
+  `cat-server` by the sibling agent).
+- `server/src/rigctl.rs` — deleted (generalized into `cat-rigctl` by the
+  sibling agent).
+- `server/src/rigctl_radio.rs` — new: `Ft991aRigctl<S>` wrapper +
+  `impl RigctlRadio` (see `findings.md` for why a wrapper, not a direct
+  impl on `radio::Ft991a<S>`, is required), with the Hamlib mode tables
+  and freq range ported verbatim.
+- `server/src/lib.rs` — shrunk to a `ServerConfig` re-export + thin
+  `run()` wrapper around `cat_rigctl::run`.
+- `planning/app/{task_plan,findings,progress}.md` — this task's record.
+- `src/main.rs`/`CLAUDE.md` — NOT touched by this task; both already had
+  unrelated, pre-existing uncommitted changes from an earlier task this
+  session (`--server <host:port>` TCP client mode) when this task began.
+  Confirmed `server::run`/`server::ServerConfig`'s public shape needed
+  zero changes for `main.rs` to keep compiling (verified via build, not
+  assumed).
+
+Verification (all green):
+- `cargo build --workspace`, `cargo test --workspace` (server: 8 tests,
+  full workspace otherwise unaffected), `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --check`, `cargo check
+  --target x86_64-pc-windows-gnu -p ft991a`.
+- Real end-to-end run against the live `emulator` + real `/usr/bin/rigctl`
+  (Hamlib 4.6.5) CLI: `f`/`F <hz>.000000`/`f` round-trips the decimal form
+  Hamlib actually sends; `t`/`T 1`/`t`/`T 0`/`t` round-trips PTT — both
+  clean, fast, no `RPRT -1`/timeout, every time. Mode (`m`/`M`) verified
+  correct via the raw wire subset this bridge's own docs say `netrigctl.c`
+  actually sends (`nc`, bypassing Hamlib's C client) — see `findings.md`
+  for a real, pre-existing (not a migration regression) compatibility gap
+  found where the literal `rigctl -m 2 ... M <mode> <width>` CLI
+  subcommand specifically silently no-ops on this Hamlib version, due to
+  an unimplemented `\get_lock_mode` probe Hamlib's `rig_set_mode()` now
+  sends first.
+- Killed all emulator/server background processes started for this
+  verification; confirmed `.cargo/config.toml` shows as untracked (not
+  staged) in `git status` before committing.
+
+Committed locally (not pushed) — see final report for the commit hash.
+Staged only the files listed above; left the pre-existing unrelated
+`src/main.rs`/`CLAUDE.md` changes (from an earlier task this session)
+uncommitted, exactly as found.

@@ -77,6 +77,11 @@ cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch 
 cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+# Generic Hamlib rigctld-compatible TCP bridge + network-server
+# orchestration (`server` crate), radio-independent behind the
+# `RigctlRadio` trait. Replaces this app's previously hand-rolled
+# `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 [package]
 name = "ft991a"

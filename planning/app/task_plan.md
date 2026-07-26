@@ -255,3 +255,146 @@ zero Linux behavior change.
 - If the hand-rolled `block_on`/`Waker` has any subtlety not fully
   confident is correct, say so explicitly rather than presenting uncertain
   code as solid.
+
+---
+
+## Wave 4 Task (TCP client mode, `--server` flag, 2026-07-25)
+
+### Goal
+User-requested follow-on to the `server` crate's `--raw-tcp-port` (Wave 5
+of `planning/architect/task_plan.md` §12.2/§12.4, already shipped): let
+the normal `ft991a` control/TUI program connect to a *remote* `ft991a
+server` instance over `cat-server`'s raw length-prefixed TCP protocol,
+instead of always opening a local serial port. Previously there was no
+client-side code anywhere in this repo for that protocol — `server`'s
+`--raw-tcp-port` only bound the *listener* side.
+
+### Ground truth read this session
+- `cat-transport-tcp::TcpCatSession` (from `radio-cat-rs`, pinned commit
+  `889591b`, checked out at
+  `~/.cargo/git/checkouts/radio-cat-rs-9331b1d7e7b69b5f/889591b`) is the
+  client-side session type wire-compatible with `cat-server`'s
+  `tcp::serve` accept loop (confirmed by reading both — `cat-server/src/
+  tcp.rs`'s doc comment states it explicitly and calls the exact same
+  `cat_transport_tcp::{read_frame_or_eof, write_frame}` free functions).
+  `TcpCatSession::connect(addr)` is the constructor to use.
+- **Blocker found**: `TcpCatSession::Error = TcpSessionError`, but every
+  `Ft991a<S>` trait impl in `radio/src/ft991a.rs` is bounded on `S:
+  CatSession<Error = TransportError>` specifically — `TransportError`
+  (from `cat-transport-core`), not `TcpSessionError`. Can't use
+  `TcpCatSession` as `S` directly; needs a thin adapter mapping
+  `TcpSessionError` → `TransportError`, exactly the same shape as
+  `server/src/broker_session.rs`'s `BrokerCatSession` (which exists for
+  precisely this reason, per its own doc comment). `radio` itself must
+  never import a transport crate directly (Rule 2), so this adapter lives
+  in `src/main.rs` (the wiring layer), not `radio`.
+- **Second blocker found**: `ui::run<R: Radio + Ft991aExtras + CwKeying +
+  'static>` requires `CwKeying` unconditionally, but `radio`'s `CwKeying`
+  impl for `Ft991a<S>` is itself conditional on `S: ModemControlLines`
+  (`ft991a.rs:2830`) — TCP has no RTS/DTR concept, so a bare
+  `TcpCatSession`-backed session doesn't get `CwKeying` for free, and
+  `ui::run` would fail to compile against it. Resolution: implement
+  `ModemControlLines` on the new adapter too, with every method returning
+  `Err(TransportError::Other("... not available over a TCP CAT
+  connection"))` — honest failure at the point of use (mirrors this
+  repo's existing pattern of `RPRT_ERR`/`RadioError::NotImplemented`
+  rather than silently faking success). Confirmed safe: `CwKeying`'s
+  trait-level default methods already return
+  `Err(RadioError::NotImplemented)`, and `Ft991a<S>`'s `CwKeying` impl
+  (`ft991a.rs:2834-2848`) just forwards to inherent methods returning
+  `RadioResult<()>`/`RadioResult<bool>` — no panic path, clean error
+  propagation up through `ui`.
+- Root `Cargo.toml`'s `[dependencies]` only names `cat-transport-serial`
+  today (comment there says `cat-transport-core` is transitive-only,
+  "never named directly here" — no longer true after this change). Need
+  to add `cat-transport-core`, `cat-transport-tcp`, and `async-trait`
+  (already in `[workspace.dependencies]`, just not consumed by the root
+  package yet) to `[dependencies]`.
+- `src/` is a single `main.rs` (517 lines) with no submodules — the new
+  adapter type goes inline in `main.rs`, matching the existing
+  single-file convention rather than introducing a new module file for
+  ~30 lines of adapter code.
+- Direct/TUI-mode `Args`/`parse_args()` (main.rs:32-144) is a different,
+  separate parser from `ServerArgs`/`parse_server_args()` (main.rs:172-299,
+  the `ft991a server ...` subcommand's own flags) — the new `--server
+  <host:port>` flag belongs in the former, is mutually exclusive with
+  `--port`, and is orthogonal to (does not touch) the latter.
+
+### Plan
+1. Root `Cargo.toml`: add `cat-transport-core`, `cat-transport-tcp`,
+   `async-trait` to `[dependencies]`; update/remove the now-stale
+   "transitive only" comment.
+2. `src/main.rs`:
+   - `Args.port` becomes `Option<String>`; add `Args.server:
+     Option<String>`. `parse_args()` gains a `--server <host:port>` case
+     and a final mutual-exclusivity/at-least-one-required check (mirrors
+     `parse_server_args()`'s own "at least one of ..." pattern), update
+     `usage_exit()` text.
+   - New `TcpClientSession` struct wrapping `cat_transport_tcp::
+     TcpCatSession`, implementing `cat_transport_core::CatSession<Error =
+     TransportError>` (map `TcpSessionError::Io` → `TransportError::Io`,
+     `FrameTooLarge{..}` → `TransportError::Other(..)`) and
+     `cat_transport_core::ModemControlLines` (every method →
+     `Err(TransportError::Other("RTS/DTR control lines are not available
+     over a TCP CAT connection"))`) — doc comment cites
+     `server/src/broker_session.rs` as the precedent this mirrors.
+   - Split `run_app()`'s tail into `run_over_serial(&Args)` (existing
+     `SerialPort`/`SerialCatSession` path, unchanged behavior) and
+     `run_over_tcp(&Args, addr: &str)` (new `TcpCatSession::connect` +
+     `TcpClientSession` + `Ft991a::new` path) — both apply `--profile`
+     and call `ui::run` identically; small duplication preferred over a
+     shared-generic-helper abstraction for ~15 lines, per this repo's
+     "three similar lines beats a premature abstraction" norm.
+3. Verification: `cargo build --workspace`, `cargo test --workspace`,
+   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt
+   --check`, Windows cross-check (`cat-transport-tcp` must be confirmed
+   Windows-buildable too — check its `Cargo.toml`/source for any
+   Linux-only gating before assuming this is free), then a real
+   end-to-end run: `ft991a server --port <emulator-pty> --raw-tcp-port
+   <n>` in one process, `ft991a --server 127.0.0.1:<n>` in another,
+   confirm the TUI actually drives the emulator over the TCP hop.
+
+### Constraints
+- Do not touch `radio/` — the adapter is transport-crate-touching by
+  nature (Rule 2), so it belongs in `src/main.rs`, never `radio`.
+- Do not weaken `ui::run`'s `CwKeying` bound to work around the
+  `ModemControlLines` gap — implement the honest-error adapter instead
+  (see blocker discussion above).
+- Do not commit unless asked.
+
+## Task: Migrate `server` crate onto `cat_server::BrokerCatSession` +
+new `cat-rigctl` crate (2026-07-26)
+
+Sibling agent extracted this app's `server/src/broker_session.rs`
+(verbatim) into `cat-server`, and generalized `server/src/rigctl.rs` +
+`server/src/lib.rs::run()` into a new `cat-rigctl` crate (`RigctlRadio`
+trait + `ServerConfig` + `run()`), local commit `36f783d` in
+`radio-cat-rs`, not pushed.
+
+### Plan
+1. Local-only `.cargo/config.toml` `[patch]` block pointing every
+   `radio-cat-rs`-sourced crate (not just `cat-rigctl`) at the local
+   checkout, so the workspace resolves against one git source
+   consistently. Never `git add` it.
+2. Add `cat-rigctl` to root `Cargo.toml` `[workspace.dependencies]` and
+   `server/Cargo.toml`.
+3. Delete `server/src/broker_session.rs` and `server/src/rigctl.rs`
+   entirely. Add `server/src/rigctl_radio.rs`: `impl RigctlRadio for
+   Ft991a<S>`, delegating to the existing inherent async methods, porting
+   the Hamlib mode tables + freq range verbatim from the deleted
+   `rigctl.rs`. Rewrite `server/src/lib.rs` to a thin `ServerConfig`
+   re-export + `run()` wrapper calling `cat_rigctl::run`. Trim
+   `server/Cargo.toml` deps that become unused.
+4. Verify: build/test/clippy/fmt for the whole workspace, Windows
+   cross-check, then real end-to-end: emulator + `ft991a server
+   --rigctl-port` + real `/usr/bin/rigctl -m 2` CLI exercising f/F
+   (decimal form)/m/M/t/T.
+5. Commit locally (not pushed), confirming `.cargo/config.toml` stays
+   untracked.
+
+### Constraints
+- `.cargo/config.toml` is dev scaffolding only — never committed, never
+  added to `.gitignore` (don't touch shared gitignore state for it).
+- Do not push to any remote (this repo or radio-cat-rs).
+- `main.rs` should need zero changes if `server::run`/`ServerConfig`'s
+  public shape is preserved — confirm via build, don't assume.

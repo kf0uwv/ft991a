@@ -21,32 +21,28 @@ rust-version.workspace = true
 [dependencies]
 # FT-991A command table + client + domain types — this crate is
 # contractually FT-991A-shaped (like `ui`), not radio-generic: the rigctld
-# translator calls `radio::Ft991a`'s typed methods directly.
+# bridge calls `radio::Ft991a`'s typed methods directly (via
+# `rigctl_radio::Ft991aRigctl`).
 radio = { path = "../radio" }
 
-# Generic CAT engine + client mechanics.
-cat-framework = { workspace = true }
-cat-client = { workspace = true }
+# `CatSession`/`TransportError` — the bound `Ft991aRigctl<S>`/this crate's
+# `run()` wrapper are generic over.
 cat-transport-core = { workspace = true }
 
-# The request broker + raw TCP/UDP listeners this crate wires up.
-cat-server = { workspace = true }
+# Generic rigctld bridge (dispatch/dump_state/framing, listener
+# orchestration/error propagation) behind `RigctlRadio` — this crate now
+# only supplies the FT-991A-specific `RigctlRadio` impl
+# (`src/rigctl_radio.rs`, via the local `Ft991aRigctl<S>` wrapper — see its
+# doc comment for why a wrapper is needed) and a thin `run()` wrapper.
+cat-rigctl = { workspace = true }
 
 # Async runtime — Linux-only, see the crate-level doc comment above.
+# Named directly for `#[monoio::test]` in this crate's own unit tests.
 monoio = { workspace = true }
 
-# Async traits (compatible with !Send futures for monoio).
+# Async traits (compatible with !Send futures for monoio) — `Ft991aRigctl`'s
+# `impl RigctlRadio` is `#[async_trait(?Send)]`.
 async-trait = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
-
-# Logging
-tracing = { workspace = true }
-
-# `futures::future::select_all` — waiting on the first of several listener
-# tasks to end (`lib.rs::run`).
-futures = { workspace = true }
 
 [features]
 default = []

@@ -1,5 +1,69 @@
 # App Agent Findings
 
+## `server` crate migration onto `cat_server::BrokerCatSession`/`cat-rigctl` (2026-07-26)
+
+- **Orphan-rules deviation (required, not optional)**: the task sketch's
+  `impl cat_rigctl::RigctlRadio for radio::Ft991a<S>` in `server/src/
+  rigctl_radio.rs` does not compile (`E0117`) — neither `RigctlRadio`
+  (from `cat_rigctl`) nor `Ft991a` (from `radio`) is local to `server`,
+  and Rust's coherence rules require at least one to be. Fixed with a
+  minimal local newtype wrapper, `Ft991aRigctl<S>(Ft991a<S>)`, and
+  implemented `RigctlRadio` on that instead — every method still just
+  delegates straight through to the wrapped `Ft991a<S>`.
+- Diffed the deleted `server/src/rigctl.rs`'s `match cmd { ... }` dispatch
+  body against `cat-rigctl/src/rigctl.rs`'s: byte-for-byte identical
+  except the expected mechanical renames (`radio.get_vfo_a()` →
+  `radio.get_vfo_a_hz()`, `hamlib_mode_name` → `R::hamlib_mode_name`,
+  etc.). Confirms the migration is behavior-preserving for every command
+  this bridge implements.
+- **Real finding, not a migration regression**: the real Hamlib `rigctl`
+  CLI installed on this machine (4.6.5, 2025-09-05) does NOT reproduce
+  the module doc's claimed `netrigctl.c` command subset
+  (`f`/`F`/`m`/`M`/`t`/`T`/`v`/`\chk_vfo`/`\dump_state`) for mode changes.
+  `rigctl -m 2 -r host:port M <mode> 0` internally calls `rig_set_mode()`,
+  which first sends `\get_lock_mode` (confirmed via `-vvvvv` trace) — a
+  command neither the old nor the new dispatch table implements (falls
+  into the deliberate `_ => RPRT_ERR` catch-all, "not implemented rather
+  than silently faked" per the module's own docs). Hamlib's client-side
+  logic then silently abandons the actual `M` write after that RPRT -1
+  (confirmed via the emulator's own JSON command log: no `MD0<x>;` frame
+  ever reaches the wire) yet still reports success (`rig_set_mode
+  returning(0)`) after a ~10-15s internal delay. Frequency (`F`)/PTT (`T`)
+  are unaffected — `rig_set_freq`/`rig_set_ptt` don't probe
+  `\get_lock_mode` first, and both verified with perfect, fast round
+  trips via the real CLI every time.
+  - Confirmed this is a genuine pre-existing gap, not something this
+    migration introduced: the dispatch match arms are identical between
+    the deleted `server/src/rigctl.rs` and `cat-rigctl/src/rigctl.rs`
+    (diffed directly, see above), and mode set/get both work correctly
+    end-to-end when driven with the *actual* documented wire subset via
+    raw `nc` (bypassing Hamlib's C client entirely) — `M LSB 0` →
+    `MD01;` on the wire → emulator state change → subsequent `m` query
+    correctly reports `LSB`.
+  - Out of scope to fix here: doing so would mean adding new dispatch
+    arms (`\get_lock_mode`, and likely `\get_powerstat`, which the same
+    trace also shows queried) to the *shared* `cat-rigctl` crate in
+    `radio-cat-rs` — a real behavior change, not a migration, and this
+    task's charter was a pure migration. Flagging for a follow-up task.
+- Scratch-file collisions and a reaped background process cost real time
+  during E2E verification: this host runs multiple concurrent agent
+  sessions that apparently share generic scratch filenames (`emulator.log`,
+  `server.log` both got clobbered mid-investigation by an unrelated
+  session's `ts570d` emulator/server output). Also, a `cargo run -p
+  emulator -- --background &` backgrounded via a plain `&` (no `setsid`)
+  got reaped when its owning shell wrapper exited between tool calls,
+  silently killing the emulator mid-session and producing a batch of
+  confusing "everything now fails" symptoms that had nothing to do with
+  the migration. Fix: always use `setsid nohup ... &` + `disown` and a
+  PID-suffixed, unique log filename for any long-lived background process
+  started for E2E verification in this environment.
+- `server/Cargo.toml`'s deps shrank further than the task sketch implied:
+  once `rigctl.rs`/`broker_session.rs`/the old `lib.rs::run()` are gone,
+  `cat-framework`, `cat-client`, `cat-server` (direct dep — still used
+  transitively via `cat-rigctl`, just never named directly anymore),
+  `thiserror`, `tracing`, and `futures` are all unused by this crate's
+  own source. Verified by `grep`, not guessed.
+
 ## Wave 1 Task 2 (2026-07-17)
 
 - `radio/Cargo.toml` and `radio/src/*` are the real, reviewed crate (built
