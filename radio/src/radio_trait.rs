@@ -2143,35 +2143,6 @@ pub trait Ft991aExtras {
         Err(RadioError::NotImplemented)
     }
 
-    // -----------------------------------------------------------------------
-    // Diagnostics (`docs/adr/0004-shared-diagnostics-screen.md`) — new, not
-    // a re-export of an existing inherent method
-    // -----------------------------------------------------------------------
-
-    /// Run `radio-cat-rs`'s shared, radio-generic diagnostics engine
-    /// (`cat_diagnostics::run_diagnostics_with`) against every command in
-    /// [`crate::FT991A_COMMAND_TABLE`], invoking `on_progress` with each
-    /// [`crate::DiagnosticOutcome`] as soon as it is known — the hook a `ui`
-    /// render loop uses for live per-command progress.
-    ///
-    /// Lives here, not called directly from `ui`, because
-    /// `cat_diagnostics::run_diagnostics_with` needs a concrete `&mut
-    /// cat_client::CatClient<C, S>`, which `ui` cannot obtain from a
-    /// generic `R: Radio + Ft991aExtras + CwKeying` value — see
-    /// `crate::diagnostics`'s module doc comment for the full reasoning.
-    /// [`crate::Ft991a<S>`]'s impl (`ft991a.rs`) is the only real
-    /// implementation; this default returns
-    /// [`RadioError::NotImplemented`] without invoking `on_progress` at
-    /// all, exactly this trait's own established idiom.
-    async fn run_diagnostics_with<F>(
-        &mut self,
-        _on_progress: F,
-    ) -> RadioResult<crate::DiagnosticSummary>
-    where
-        F: FnMut(&crate::DiagnosticOutcome),
-    {
-        Err(RadioError::NotImplemented)
-    }
 }
 
 // ---------------------------------------------------------------------------

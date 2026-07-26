@@ -82,10 +82,6 @@ cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 # `RigctlRadio` trait. Replaces this app's previously hand-rolled
 # `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
 cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-# Shared, radio-independent diagnostics/self-test engine (ADR 0007,
-# radio-cat-rs). Consumed by `ui`'s new diagnostics screen — see
-# docs/adr/0003-shared-diagnostics-screen.md.
-cat-diagnostics = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 
 # ---------------------------------------------------------------------------
 # TEMPORARY: local path patch, to be removed once radio-cat-rs's `main` is
@@ -93,9 +89,11 @@ cat-diagnostics = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "ma
 # against the real upstream commit.
 #
 # radio-cat-rs's ADR 0006/0007/0008 work (Windows network transport for
-# cat-transport-tcp/udp/cat-server, the new cat-diagnostics crate, the
-# shared cat-transport-serial `pin-test` binary, `NoModemControlLines`, the
-# shared release workflow) exists only as LOCAL commits on that sibling
+# cat-transport-tcp/udp/cat-server, the cat-diagnostics crate (no longer
+# consumed by this repo — see docs/adr/0006-hand-coded-full-parity-
+# diagnostics.md), the shared cat-transport-serial `pin-test` binary,
+# `NoModemControlLines`, the shared release workflow) exists only as LOCAL
+# commits on that sibling
 # repo's own `main` branch (verified via `git log` there, HEAD `cffd430`) —
 # it has not been pushed to `https://github.com/kf0uwv/radio-cat-rs`. Without
 # this patch, every `branch = "main"` git dependency above would silently
@@ -113,7 +111,6 @@ cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
 cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
 cat-server = { path = "../radio-cat-rs/cat-server" }
 cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
-cat-diagnostics = { path = "../radio-cat-rs/cat-diagnostics" }
 
 [package]
 name = "ft991a"
