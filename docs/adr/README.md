@@ -8,8 +8,9 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 | [0001](0001-second-radio-on-shared-cat-framework.md) | Second radio on the shared CAT framework | Accepted |
 | [0002](0002-rts-dtr-ptt-cw-keying.md) | RTS/DTR PTT and CW keying: RS-232C-only, DTR deferred | Accepted |
 | [0003](0003-consume-radio-cat-rs-windows-network-transport.md) | Consuming radio-cat-rs's unpushed ADR 0006 work: temporary `[patch]`, Windows-enabling `--server`, and `NoModemControlLines` | Accepted |
-| [0004](0004-shared-diagnostics-screen.md) | Shared diagnostics screen (`cat-diagnostics`) | Accepted |
+| [0004](0004-shared-diagnostics-screen.md) | Shared diagnostics screen (`cat-diagnostics`) | Superseded by [0006](0006-hand-coded-full-parity-diagnostics.md) |
 | [0005](0005-debian-and-windows-packaging.md) | Debian/Windows packaging and CI/release automation | Accepted |
+| [0006](0006-hand-coded-full-parity-diagnostics.md) | Hand-coded, full-parity diagnostics (replaces `cat-diagnostics`) | Accepted |
 
 ## Repository status
 
@@ -56,8 +57,23 @@ regressions across the whole build-up, clippy/fmt clean.
   tests passing, clippy/fmt clean, `cargo check --target
   x86_64-pc-windows-gnu -p ft991a` green.
 
+- **2026-07-26 (later the same day)**: the `[D]` diagnostics screen was
+  rebuilt from scratch as a hand-coded, `ts570d`-parity engine living in
+  `ui` — full test-and-restore coverage (set, verify, restore) for all 91
+  commands, including the 28 previously read-only-skipped ones, gated
+  behind an explicit transmit-safety warning screen and a callsign prompt
+  for the CW-keying test ([ADR 0006](0006-hand-coded-full-parity-diagnostics.md)).
+  `radio` no longer depends on `cat-diagnostics` at all — superseding
+  [ADR 0004](0004-shared-diagnostics-screen.md)'s design (kept below for
+  history). Verified end-to-end against the live `emulator`: 114/114
+  passed with a supplied callsign, 113 passed/1 skipped without one (zero
+  `KY` commands sent on the wire), and byte-for-byte identical radio state
+  before and after each run.
+
 See [ADR 0001](0001-second-radio-on-shared-cat-framework.md),
 [ADR 0002](0002-rts-dtr-ptt-cw-keying.md),
 [ADR 0003](0003-consume-radio-cat-rs-windows-network-transport.md),
-[ADR 0004](0004-shared-diagnostics-screen.md), and
-[ADR 0005](0005-debian-and-windows-packaging.md) for the design record.
+[ADR 0004](0004-shared-diagnostics-screen.md) (superseded by ADR 0006 for
+the diagnostics engine itself),
+[ADR 0005](0005-debian-and-windows-packaging.md), and
+[ADR 0006](0006-hand-coded-full-parity-diagnostics.md) for the design record.

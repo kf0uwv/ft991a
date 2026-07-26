@@ -4,7 +4,11 @@ Date: 2026-07-26
 
 ## Status
 
-Accepted
+Superseded by [ADR 0006](0006-hand-coded-full-parity-diagnostics.md)
+(2026-07-26, later the same day) — the user chose full parity with
+`ts570d`'s own diagnostics screen over this design's read-only-liveness
+trade-off. `radio` no longer depends on `cat-diagnostics` at all; the
+engine now lives entirely in `ui`. Kept below for historical context.
 
 ## Context
 

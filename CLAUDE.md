@@ -80,20 +80,37 @@
   `fn` on Windows) to match `cat_rigctl::run`'s own split. Confirmed:
   `cargo check --target x86_64-pc-windows-gnu -p ft991a -p server` clean.
   See `docs/adr/0003`'s amendment.
-- A shared, radio-generic **diagnostics screen** (`[D]` in the main menu)
-  invokes `radio-cat-rs`'s new `cat-diagnostics` crate
-  (`cat_diagnostics::run_diagnostics_with`) against
-  `radio::FT991A_COMMAND_TABLE` through the existing `Ft991a<S>` client,
-  and renders the resulting `DiagnosticReport` (per-command pass/fail/
-  timeout/skipped + latency + totals) live as it runs. Unlike `ts570d`'s
-  own diagnostics screen, this is **liveness-only** (issues each command's
-  documented read form and checks it answers without error) not
-  set/get value-correctness — see `docs/adr/0004-shared-diagnostics-
-  screen.md` for why, and for why `ui` depending on
-  `cat-diagnostics` directly does not violate this repo's "`ui` never
-  imports a transport crate" rule (`cat-diagnostics` is radio-generic, not
-  a transport crate — it depends on `cat-framework`/`cat-client`/
-  `cat-transport-core` only, the same tier `cat-client` itself sits at).
+- The `[D]` diagnostics screen (`ui/src/terminal.rs`'s
+  `run_diagnostics_task`) is now a **hand-coded, full-parity** engine,
+  matching `ts570d`'s own standard of care — the user's explicit choice
+  over the original read-only `cat-diagnostics`-wrapped design
+  (`docs/adr/0004-shared-diagnostics-screen.md`, now superseded). Every one
+  of the 91 top-level `FT991A_COMMAND_TABLE` commands' underlying
+  `Radio`/`Ft991aExtras` methods is exercised via a real typed call
+  (snapshot state up front, set, verify, restore at the end) — including
+  all 28 commands the old read-only engine could only mark `Skipped`
+  (S-Meter/Read Meter/Radio Information/Memory Channel Read as plain reads;
+  Memory Channel Write/VFO-A-to-Memory/QMB Store/Channel Up-Down/Clarifier
+  Clear-Down-Up with real snapshot+restore; Swap VFO/Quick Split with
+  symmetric self-undo; Band Select/Up/Down/Encoder Down/Up/Ent Key/Zero
+  In/Down/Up as verified actions; `[V/M]` Key Function and CW Keying each
+  conditionally `Skipped` with an honest, specific reason when they cannot
+  be safely restored/attempted). `radio` no longer depends on
+  `cat-diagnostics` at all — the engine lives entirely in `ui`
+  (`ui/src/diagnostics.rs` for the `DiagOutcome`/`DiagResult`/`DiagSummary`
+  data model, `terminal.rs` for `RadioSnapshot`/`snapshot_state`/
+  `restore_state`/`run_diagnostics_task`), since it only ever calls typed
+  `Radio`/`Ft991aExtras` methods, never `cat_framework`/`CatClient`
+  directly. Because this genuinely keys the transmitter (PTT, and CW if a
+  callsign is supplied), pressing `[D]` first shows a red-bordered,
+  explicit-acknowledgment warning screen (`ControlState::DiagWarning`)
+  before anything is sent, then prompts for an operator-supplied callsign
+  (`InputAction::DiagCwCallsign`, reusing the existing text-entry widget) —
+  the CW keying step only ever sends `"TEST <CALLSIGN>"` (never a bare,
+  unidentified `"TEST"`), and is `Skipped` rather than sent bare if the
+  prompt is left blank, without aborting the rest of the run. See
+  `docs/adr/0006-hand-coded-full-parity-diagnostics.md` for the full
+  per-command safety reasoning and emulator verification results.
 - Packaging: `packaging/build-deb.sh` builds a `ft991a-radio-control` `.deb`
   (mirrors `ts570d`'s script), and `packaging/build-windows-package.ps1`
   produces a Windows zip package, both consumed by radio-cat-rs's shared
@@ -188,7 +205,7 @@ cat-transport-serial  (external crate, from radio-cat-rs — NOT part of this re
       Linux, native Win32 COM-port transport on Windows, same public API on
       both platforms. This repo has NO local `serial` crate.
 
-radio  (depends on: cat-framework, cat-client, cat-transport-core, cat-diagnostics)
+radio  (depends on: cat-framework, cat-client, cat-transport-core)
   └── defines: Ft991aCommandId, FT991A_COMMAND_TABLE (91 commands),
       EX_MENU_TABLE (151 of 153 settings items)
   └── defines: Ft991aRadio (CatRadio impl + emulator state machine), Ft991aState, Ft991aEvent
@@ -196,16 +213,12 @@ radio  (depends on: cat-framework, cat-client, cat-transport-core, cat-diagnosti
       (~50 FT-991A-specific methods, NotImplemented-defaulted, mirrors
       Radio's idiom), CwKeying trait (RTS/DTR CW keying, bounded on
       + ModemControlLines) + FT-991A domain types
-  └── defines: DiagnosticResult/DiagnosticOutcome/DiagnosticSummary
-      (radio/src/diagnostics.rs) — concrete, non-generic mirrors of
-      cat_diagnostics's own report types, so `ui` never needs to depend
-      on cat-diagnostics itself (see docs/adr/0004)
   └── implements: Radio + Ft991aExtras (unconditional) + CwKeying
       (bounded) for Ft991a<S: CatSession> (controller client)
-  └── Ft991aExtras::run_diagnostics_with wraps
-      cat_diagnostics::run_diagnostics_with — the ONLY place this repo
-      calls into cat-diagnostics; `ui` cannot (see below)
   └── Ft991a is generic over S — never imports a transport crate directly
+  └── NO diagnostics engine or cat-diagnostics dependency of any kind —
+      the `[D]` screen (ui/src/terminal.rs, ui/src/diagnostics.rs) calls
+      typed Radio/Ft991aExtras methods directly instead (docs/adr/0006)
 
 ui  (depends on: radio only)
   └── uses: radio::{Radio, Ft991aExtras, CwKeying} trait bounds
@@ -214,13 +227,12 @@ ui  (depends on: radio only)
       ui is contractually FT-991A-shaped, not radio-generic, per the Rust
       coherence constraint recorded in planning/architect/task_plan.md §11.3
   └── uses: radio domain types (Frequency, Mode, ...) for display
-  └── uses: radio::{DiagnosticSummary, DiagnosticOutcome, DiagnosticResult}
-      for the `[D]` diagnostics screen — NEVER cat-diagnostics itself.
-      `ui::run`'s generic `R: Radio + ...` bound has no way to obtain the
-      concrete `CatClient` cat_diagnostics::run_diagnostics_with needs
-      (Ft991a<S>::client is pub(crate)), so this isn't a style choice —
-      `ui` structurally cannot call cat-diagnostics even if it wanted to
-      (see docs/adr/0004)
+  └── defines: DiagOutcome/DiagResult/DiagSummary (ui/src/diagnostics.rs)
+      and the full hand-coded diagnostics engine
+      (RadioSnapshot/snapshot_state/restore_state/run_diagnostics_task in
+      terminal.rs) for the `[D]` screen — calls typed Radio/Ft991aExtras
+      methods only, never cat_framework/CatClient (docs/adr/0006,
+      superseding docs/adr/0004's cat-diagnostics-wrapped design)
   └── NEVER imports cat-transport-serial or any other transport crate
 
 emulator  (depends on: cat-framework + radio)
