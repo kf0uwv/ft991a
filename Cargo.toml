@@ -17,7 +17,7 @@ members = ["radio", "ui", "emulator", "server"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 authors = ["Matt Franklin <radiombf@gmail.com>"]
 license = "Apache-2.0"
@@ -65,52 +65,25 @@ tempfile = "3.10.1"
 mockall = "0.12.1"
 
 # Generic CAT engine + transports, from https://github.com/kf0uwv/radio-cat-rs
-# (see docs/adr/0001-second-radio-on-shared-cat-framework.md). Floating on
-# `branch = "main"` while both repos co-evolve pre-1.0, mirroring
-# ts570d/Cargo.toml's dependency syntax exactly.
-cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+# (see docs/adr/0001-second-radio-on-shared-cat-framework.md). Pinned to the
+# v0.1.0 release tag (rather than floating on `branch = "main"`) so this
+# app's build is reproducible against a known-good, released snapshot of
+# the shared library instead of whatever happens to be on that repo's main
+# branch at build time.
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
 # Server mode only (Wave 5, `server` crate) — the request broker + raw
-# TCP/UDP listeners. Linux-only, per `cat-server`'s own Cargo.toml.
-cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+# TCP/UDP listeners.
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
 # Generic Hamlib rigctld-compatible TCP bridge + network-server
 # orchestration (`server` crate), radio-independent behind the
 # `RigctlRadio` trait. Replaces this app's previously hand-rolled
 # `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
-cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
-
-# ---------------------------------------------------------------------------
-# TEMPORARY: local path patch, to be removed once radio-cat-rs's `main` is
-# actually pushed to GitHub and the `branch = "main"` deps above re-resolve
-# against the real upstream commit.
-#
-# radio-cat-rs's ADR 0006/0007/0008 work (Windows network transport for
-# cat-transport-tcp/udp/cat-server, the cat-diagnostics crate (no longer
-# consumed by this repo — see docs/adr/0006-hand-coded-full-parity-
-# diagnostics.md), the shared cat-transport-serial `pin-test` binary,
-# `NoModemControlLines`, the shared release workflow) exists only as LOCAL
-# commits on that sibling
-# repo's own `main` branch (verified via `git log` there, HEAD `cffd430`) —
-# it has not been pushed to `https://github.com/kf0uwv/radio-cat-rs`. Without
-# this patch, every `branch = "main"` git dependency above would silently
-# resolve against the old, unmodified *remote* main and miss all of it.
-#
-# Remove this whole `[patch]` table (and switch back to relying solely on
-# the `branch = "main"` git deps above) once a human has pushed
-# radio-cat-rs's `main` branch upstream.
-[patch."https://github.com/kf0uwv/radio-cat-rs"]
-cat-framework = { path = "../radio-cat-rs/cat-framework" }
-cat-client = { path = "../radio-cat-rs/cat-client" }
-cat-transport-core = { path = "../radio-cat-rs/cat-transport-core" }
-cat-transport-serial = { path = "../radio-cat-rs/cat-transport-serial" }
-cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
-cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
-cat-server = { path = "../radio-cat-rs/cat-server" }
-cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
 
 [package]
 name = "ft991a"
