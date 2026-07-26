@@ -82,6 +82,38 @@ cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
 # `RigctlRadio` trait. Replaces this app's previously hand-rolled
 # `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
 cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+# Shared, radio-independent diagnostics/self-test engine (ADR 0007,
+# radio-cat-rs). Consumed by `ui`'s new diagnostics screen — see
+# docs/adr/0003-shared-diagnostics-screen.md.
+cat-diagnostics = { git = "https://github.com/kf0uwv/radio-cat-rs", branch = "main" }
+
+# ---------------------------------------------------------------------------
+# TEMPORARY: local path patch, to be removed once radio-cat-rs's `main` is
+# actually pushed to GitHub and the `branch = "main"` deps above re-resolve
+# against the real upstream commit.
+#
+# radio-cat-rs's ADR 0006/0007/0008 work (Windows network transport for
+# cat-transport-tcp/udp/cat-server, the new cat-diagnostics crate, the
+# shared cat-transport-serial `pin-test` binary, `NoModemControlLines`, the
+# shared release workflow) exists only as LOCAL commits on that sibling
+# repo's own `main` branch (verified via `git log` there, HEAD `cffd430`) —
+# it has not been pushed to `https://github.com/kf0uwv/radio-cat-rs`. Without
+# this patch, every `branch = "main"` git dependency above would silently
+# resolve against the old, unmodified *remote* main and miss all of it.
+#
+# Remove this whole `[patch]` table (and switch back to relying solely on
+# the `branch = "main"` git deps above) once a human has pushed
+# radio-cat-rs's `main` branch upstream.
+[patch."https://github.com/kf0uwv/radio-cat-rs"]
+cat-framework = { path = "../radio-cat-rs/cat-framework" }
+cat-client = { path = "../radio-cat-rs/cat-client" }
+cat-transport-core = { path = "../radio-cat-rs/cat-transport-core" }
+cat-transport-serial = { path = "../radio-cat-rs/cat-transport-serial" }
+cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
+cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
+cat-server = { path = "../radio-cat-rs/cat-server" }
+cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
+cat-diagnostics = { path = "../radio-cat-rs/cat-diagnostics" }
 
 [package]
 name = "ft991a"
