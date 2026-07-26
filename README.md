@@ -41,7 +41,7 @@ the Yaesu FT-991A HF/VHF/UHF transceiver, written in Rust.
 |---|---|---|
 | `--port` (local serial) | yes | yes |
 | `--server <host:port>` (TCP client) | yes | yes |
-| `server ...` (headless network server) | yes | no — depends on `cat-rigctl`, which has no Windows backend upstream yet |
+| `server ...` (headless network server) | yes | yes |
 | Diagnostics screen (`[D]`) | yes | yes |
 | Built-in emulator | yes | no (PTY-only, Unix-specific) |
 

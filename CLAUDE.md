@@ -21,7 +21,9 @@
   applies a named bundle of settings (mode, filter bandwidth, gain,
   attenuator, `EX` menu items, ...) from a TOML file in one shot — see
   `planning/architect/task_plan.md` §12.3.
-- `server` (new workspace crate, Linux-only) is a headless network server
+- `server` (new workspace crate, cross-platform since `radio-cat-rs`
+  docs/adr/0006's 2026-07-26 amendment gave `cat-rigctl` a Windows backend
+  — see `docs/adr/0003`'s amendment) is a headless network server
   mode (`ft991a server --port <dev> --rigctl-port <n> [--raw-tcp-port <n>]
   [--raw-udp-port <n>]`): one process owns the physical serial port,
   shared by `radio-cat-rs`'s `cat-server` request broker with a new
@@ -68,16 +70,16 @@
   --raw-tcp-port` backed by the `emulator`, connected cleanly with no
   errors. See `planning/app/task_plan.md`'s Wave 4 task and
   `planning/radio-cat-rs-sync/task_plan.md` for this round's changes.
-- `ft991a server ...` (headless network server mode) remains **Linux-only**
-  — unlike the TCP client mode above, its bottleneck is `cat-rigctl`
-  (which `server/src/lib.rs` wraps), whose listener orchestration imports
-  `monoio::net`/calls `monoio::spawn` unconditionally in source with no
-  Windows counterpart; `radio-cat-rs` ADR 0006 explicitly scoped its
-  Windows work to `cat-transport-tcp`/`cat-transport-udp`/`cat-server`
-  only, not `cat-rigctl`. Confirmed: `cargo check --target
-  x86_64-pc-windows-gnu -p cat-rigctl` (and `-p server`) fail with
-  unresolved-crate errors on every `monoio::` call site. Lifting this is a
-  `radio-cat-rs`/`cat-rigctl` follow-on, out of this repo's scope.
+- `ft991a server ...` (headless network server mode) is now **Windows-
+  buildable too** — `radio-cat-rs` docs/adr/0006's 2026-07-26 amendment
+  gave `cat-rigctl` (which `server/src/lib.rs` wraps) a real Windows
+  backend, closing the gap that previously kept this Linux-only even after
+  `cat-transport-tcp`/`cat-transport-udp`/`cat-server` themselves became
+  cross-platform. `server::run`/`main.rs`'s `run_server_mode` are
+  `#[cfg]`-selected per platform (`async fn` on Linux, a plain blocking
+  `fn` on Windows) to match `cat_rigctl::run`'s own split. Confirmed:
+  `cargo check --target x86_64-pc-windows-gnu -p ft991a -p server` clean.
+  See `docs/adr/0003`'s amendment.
 - A shared, radio-generic **diagnostics screen** (`[D]` in the main menu)
   invokes `radio-cat-rs`'s new `cat-diagnostics` crate
   (`cat_diagnostics::run_diagnostics_with`) against

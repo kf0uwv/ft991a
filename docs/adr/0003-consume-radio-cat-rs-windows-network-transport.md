@@ -133,3 +133,29 @@ startup and clean `[Q]`-key exit.
   <host:port>` (the TCP *client* side) gained Windows support this round.
 - No behavior change on Linux for either feature — same public APIs, same
   test suite, same manual verification steps as before this round.
+
+## Amendment (2026-07-26): `ft991a server` is Windows-buildable too
+
+The limitation recorded above is resolved: `radio-cat-rs`
+docs/adr/0006-windows-network-transport.md's same-day amendment gave
+`cat-rigctl` a real Windows backend (extracting its radio-independent wire
+protocol into a new `cat-rigctl::protocol` module, shared by a Linux
+`monoio`-based accept loop and a new `std`/genuine-OS-thread one), closing
+exactly the gap this ADR's §2 described. `server`'s `Cargo.toml` dependency
+and `main.rs`'s `server` subcommand handling are no longer platform-gated;
+`server::run`/`run_server_mode` are now `#[cfg]`-selected per platform
+(`async fn` on Linux unchanged, a plain blocking `fn` on Windows, matching
+`cat_rigctl::run`'s own split — `#[monoio::main]` cannot exist on Windows).
+
+`ft991a server ...` — including `--rigctl-port`/WSJT-X support — now
+builds for both platforms with the same CLI surface. Verified: `cargo check
+--target x86_64-pc-windows-gnu -p ft991a -p server` clean; full workspace
+suite (1115 tests) passing on Linux with no regressions; manual end-to-end
+verification against the emulator (raw TCP + rigctld listeners) unchanged
+from this repo's existing Linux verification, not re-run specifically for
+this amendment since the Linux code path is byte-for-byte unchanged (only
+wrapped in an explicit `#[cfg(target_os = "linux")]` it previously had
+implicitly via the dependency graph). Windows runtime behavior is, as
+always, unverified in this sandbox — real hardware validation is the user's
+own follow-up, per this project's existing convention for every Windows
+feature so far.
