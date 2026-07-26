@@ -53,7 +53,8 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use crate::{
     control::{handle_key, ControlState, ExecuteAction, KeyResult},
     layout::{
-        draw_control_panel, draw_disconnected, draw_errors, draw_header, draw_status, split_areas,
+        draw_control_panel, draw_diagnostics_live, draw_disconnected, draw_errors, draw_header,
+        draw_status, split_areas,
     },
     Ft991aDisplay, UiError, UiResult,
 };
@@ -778,6 +779,87 @@ async fn execute_action<R: Radio + Ft991aExtras + CwKeying>(
     }
 }
 
+/// Draw one live-progress diagnostics frame (header/status/errors plus the
+/// diagnostics panel itself) — factored out so it can be called both once
+/// up front (0 outcomes yet) and from inside the [`run_diagnostics_with`]
+/// progress callback below, without duplicating [`draw_frame`]'s own
+/// header/status/errors setup.
+///
+/// [`run_diagnostics_with`]: radio::Ft991aExtras::run_diagnostics_with
+fn draw_diagnostics_frame(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    display: &Ft991aDisplay,
+    outcomes: &[radio::DiagnosticOutcome],
+    total: usize,
+) -> UiResult<()> {
+    terminal.draw(|f| {
+        let area = f.size();
+        let (header_area, status_area, errors_area, ctrl_area) = split_areas(area);
+        draw_header(f, header_area);
+        draw_status(f, status_area, display);
+        draw_errors(f, errors_area, display);
+        draw_diagnostics_live(f, ctrl_area, outcomes, total);
+    })?;
+    Ok(())
+}
+
+/// Run the shared diagnostics engine
+/// (`docs/adr/0004-shared-diagnostics-screen.md`) against
+/// [`radio::FT991A_COMMAND_TABLE`], redrawing the screen after every
+/// command outcome for live progress, and return the [`ControlState`] to
+/// transition to once it completes.
+///
+/// This is the one place in this crate that calls
+/// [`Terminal::draw`] directly from inside a synchronous callback
+/// ([`radio::Ft991aExtras::run_diagnostics_with`]'s `on_progress:
+/// FnMut(&DiagnosticOutcome)` is deliberately **not** `async` — see that
+/// trait method's own doc comment) rather than through the normal
+/// once-per-loop-iteration [`draw_frame`] call. This works because
+/// [`Terminal::draw`] is itself a plain synchronous function (ratatui does
+/// no I/O awaiting of its own), so calling it from inside a sync closure
+/// that a single `.await`ed diagnostics run invokes repeatedly is exactly
+/// as safe as calling it from `run_loop`'s own synchronous match arms.
+/// Blocks the whole event loop for the duration of the run (this crate's
+/// existing single-sequential-loop architecture, per `terminal.rs`'s own
+/// module docs, has no separate task to keep servicing key events
+/// meanwhile) — acceptable here since the run itself is bounded (91
+/// commands × up to `DEFAULT_COMMAND_TIMEOUT` = 2s each in the worst case
+/// of every command failing to answer; in the common case of a live or
+/// emulated radio, every non-`Skipped` command completes in well under a
+/// second and the whole run is correspondingly fast).
+async fn run_diagnostics_screen<R: Radio + Ft991aExtras + CwKeying>(
+    radio: &mut R,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    display: &Ft991aDisplay,
+) -> ControlState {
+    let total = radio::FT991A_COMMAND_TABLE.definitions().len();
+    let mut outcomes: Vec<radio::DiagnosticOutcome> = Vec::with_capacity(total);
+
+    // Draw the initial "0/total" frame before the first probe goes out —
+    // otherwise the screen would appear frozen on the prior `ControlState`
+    // until the first outcome arrives.
+    let _ = draw_diagnostics_frame(terminal, display, &outcomes, total);
+
+    let result = radio
+        .run_diagnostics_with(|outcome| {
+            outcomes.push(outcome.clone());
+            let _ = draw_diagnostics_frame(terminal, display, &outcomes, total);
+        })
+        .await;
+
+    match result {
+        Ok(summary) => ControlState::Diagnostics { summary, cursor: 0 },
+        // `Ft991a<S>`'s real implementation never returns `Err` here (only
+        // the trait's own `NotImplemented` default does, which this app's
+        // concrete wiring never uses) — kept as a real branch, not
+        // `unwrap()`ed away, since nothing enforces that structurally.
+        Err(e) => ControlState::Feedback {
+            message: format!("Error: {e}"),
+            is_error: true,
+        },
+    }
+}
+
 /// Run the terminal UI against a live [`radio::Radio`] implementation.
 ///
 /// Single sequential loop (see module docs for why this departs from
@@ -846,6 +928,9 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
                 match handle_key(key, &mut control, &display) {
                     KeyResult::Quit => break,
                     KeyResult::Continue => {}
+                    KeyResult::RunDiagnostics => {
+                        control = run_diagnostics_screen(radio, terminal, &display).await;
+                    }
                     KeyResult::Execute(action) => {
                         let (desc, result) = execute_action(radio, action, &mut display).await;
                         control = match result {

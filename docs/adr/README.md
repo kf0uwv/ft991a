@@ -40,5 +40,24 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 964 tests passing across the workspace (`radio` + `ui` + `emulator`), zero
 regressions across the whole build-up, clippy/fmt clean.
 
-See [ADR 0001](0001-second-radio-on-shared-cat-framework.md) and
-[ADR 0002](0002-rts-dtr-ptt-cw-keying.md) for the design record.
+- **Wave 5+** (2026-07-26): consumed `radio-cat-rs`'s ADR 0006/0007/0008
+  work (initially only available as unpushed local commits there, via a
+  temporary `[patch]` — [ADR 0003](0003-consume-radio-cat-rs-windows-network-transport.md)):
+  the `--server <host:port>` TCP client mode became Windows-buildable too
+  (`ft991a server`'s headless mode stays Linux-only — its `cat-rigctl`
+  dependency has no Windows backend upstream yet, unlike the transports
+  ADR 0006 actually fixed), `TcpClientSession` now composes the new
+  `cat_transport_core::NoModemControlLines` adapter instead of hand-rolling
+  it, and a shared diagnostics screen (`[D]`) was added, wrapping the new
+  `cat-diagnostics` crate behind `radio::Ft991aExtras::run_diagnostics_with`
+  ([ADR 0004](0004-shared-diagnostics-screen.md)). Debian packaging,
+  Windows packaging, and GitHub Actions CI/release workflows were added for
+  the first time ([ADR 0005](0005-debian-and-windows-packaging.md)). 1115+
+  tests passing, clippy/fmt clean, `cargo check --target
+  x86_64-pc-windows-gnu -p ft991a` green.
+
+See [ADR 0001](0001-second-radio-on-shared-cat-framework.md),
+[ADR 0002](0002-rts-dtr-ptt-cw-keying.md),
+[ADR 0003](0003-consume-radio-cat-rs-windows-network-transport.md),
+[ADR 0004](0004-shared-diagnostics-screen.md), and
+[ADR 0005](0005-debian-and-windows-packaging.md) for the design record.

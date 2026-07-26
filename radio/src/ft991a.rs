@@ -2732,6 +2732,34 @@ where
     async fn set_ex_menu_item(&mut self, p1: u16, value: i32) -> RadioResult<()> {
         Ft991a::set_ex_menu_item(self, p1, value).await
     }
+
+    /// The only real implementation of this trait method — see its own doc
+    /// comment on the trait for why this must live here rather than in
+    /// `ui`. Converts `cat_diagnostics`'s generic-over-`CommandId` types
+    /// into this crate's own concrete `crate::diagnostics` types as each
+    /// outcome arrives, so `on_progress` (and the final returned
+    /// `DiagnosticSummary`) never expose `cat_framework`/`cat_diagnostics`
+    /// types to the caller.
+    async fn run_diagnostics_with<F>(
+        &mut self,
+        mut on_progress: F,
+    ) -> RadioResult<crate::DiagnosticSummary>
+    where
+        F: FnMut(&crate::DiagnosticOutcome),
+    {
+        let config = cat_diagnostics::DiagnosticConfig::default();
+        let report = cat_diagnostics::run_diagnostics_with(
+            &mut self.client,
+            &FT991A_COMMAND_TABLE,
+            &config,
+            |outcome| {
+                let converted = crate::DiagnosticOutcome::from(outcome);
+                on_progress(&converted);
+            },
+        )
+        .await;
+        Ok(report.into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5823,5 +5851,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // Diagnostics (`docs/adr/0004-shared-diagnostics-screen.md`) —
+    // `Ft991aExtras::run_diagnostics_with`'s wiring/conversion glue.
+    // `crate::diagnostics`'s own module has the `DiagnosticResult`/
+    // `DiagnosticOutcome`/`DiagnosticSummary` conversion-logic unit tests;
+    // this section only exercises the `Ft991a<S>` impl itself end-to-end.
+    // =========================================================================
+
+    /// A trivial [`CatSession`] that answers every `execute()` call as a
+    /// success, echoing the request bytes back as the "response" (content
+    /// is never validated by `cat_client::CatClient::query_with_param` —
+    /// see that method's own doc comment — so this is sufficient to make
+    /// every non-`Skipped` `FT991A_COMMAND_TABLE` entry register as
+    /// [`crate::DiagnosticResult::Success`] without needing to hand-script
+    /// 90+ exact per-command exchanges the way [`FakeTransport`]-backed
+    /// tests elsewhere in this module do).
+    struct AutoAckSession;
+
+    #[async_trait(?Send)]
+    impl CatSession for AutoAckSession {
+        type Error = TransportError;
+
+        async fn execute(
+            &mut self,
+            request: &[u8],
+            response: &mut Vec<u8>,
+        ) -> Result<ResponseDisposition, Self::Error> {
+            response.extend_from_slice(request);
+            Ok(ResponseDisposition::ResponseWritten)
+        }
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_run_diagnostics_with_covers_every_table_command() {
+        use crate::Ft991aExtras;
+
+        let mut radio = Ft991a::new(AutoAckSession);
+        let mut progress_calls = 0usize;
+
+        let summary = radio
+            .run_diagnostics_with(|_outcome| progress_calls += 1)
+            .await
+            .expect("run_diagnostics_with should succeed against AutoAckSession");
+
+        let expected_total = crate::FT991A_COMMAND_TABLE.definitions().len();
+        assert_eq!(summary.total(), expected_total);
+        assert_eq!(progress_calls, expected_total);
+        // AutoAckSession never errors, so nothing should be recorded as
+        // Failure/Timeout — every command is either Success (has a
+        // generic-safe read form) or Skipped (write/action-only).
+        assert_eq!(summary.failed(), 0);
+        assert_eq!(summary.passed() + summary.skipped(), expected_total);
+        // At least one real command must actually be probed (not every
+        // command in a 90+-command table is write-only) — guards against a
+        // vacuously-passing test where `choose_probe` skipped everything.
+        assert!(summary.passed() > 0, "expected at least one Success");
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_run_diagnostics_with_first_outcome_matches_table_order() {
+        use crate::Ft991aExtras;
+
+        let mut radio = Ft991a::new(AutoAckSession);
+        let summary = radio
+            .run_diagnostics_with(|_| {})
+            .await
+            .expect("run_diagnostics_with should succeed against AutoAckSession");
+
+        let first_def = crate::FT991A_COMMAND_TABLE
+            .definitions()
+            .first()
+            .expect("command table must be non-empty");
+        let first_outcome = summary
+            .outcomes
+            .first()
+            .expect("summary must have at least one outcome");
+        assert_eq!(first_outcome.code, first_def.code);
+        assert_eq!(first_outcome.name, first_def.name);
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_ft991aextras_run_diagnostics_with_default_is_not_implemented() {
+        // The trait's own default body (not `Ft991a<S>`'s override) —
+        // every other `Ft991aExtras` default follows this same
+        // `RadioError::NotImplemented` idiom; this confirms the new method
+        // is no exception, using `NopRadio` (the canonical all-defaults
+        // `Radio`/`Ft991aExtras` fixture elsewhere in this workspace).
+        use crate::Ft991aExtras;
+        let mut radio = crate::NopRadio;
+        let mut called = false;
+        let result = radio.run_diagnostics_with(|_| called = true).await;
+        assert!(matches!(result, Err(RadioError::NotImplemented)));
+        assert!(!called, "default body must not invoke on_progress at all");
     }
 }

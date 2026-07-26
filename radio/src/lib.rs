@@ -118,11 +118,13 @@
 //! assert!(fa.is_writable());
 //! ```
 
+pub mod diagnostics;
 pub mod ft991a;
 pub mod ft991a_radio;
 pub mod profile;
 pub mod radio_trait;
 
+pub use diagnostics::{DiagnosticOutcome, DiagnosticResult, DiagnosticSummary};
 pub use ft991a::Ft991a;
 pub use ft991a_radio::{
     apf_hz_to_raw, apf_raw_to_hz, ctcss_tone_hz, ctcss_tone_index, dcs_code_index, dcs_code_number,

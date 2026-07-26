@@ -13,6 +13,15 @@ rust-version.workspace = true
 cat-framework = { workspace = true }
 cat-client = { workspace = true }
 cat-transport-core = { workspace = true }
+# Shared, radio-generic diagnostics/self-test engine (radio-cat-rs ADR
+# 0007) — wrapped here, not called directly from `ui`, because
+# `cat_diagnostics::run_diagnostics_with` needs a concrete `&mut
+# CatClient<C, S>`, which `ui` never has access to (`ui::run`'s generic `R:
+# Radio + Ft991aExtras + CwKeying` bound only ever sees trait-object-free
+# generic values, never the concrete `Ft991a<S>` struct or its `pub(crate)
+# client` field) — see `docs/adr/0004-shared-diagnostics-screen.md` and
+# `src/diagnostics.rs`'s module doc comment.
+cat-diagnostics = { workspace = true }
 
 # Runtime
 monoio = { workspace = true }

@@ -22,9 +22,8 @@
 //! `draw_control_panel` now renders the grouped-menu skeleton's
 //! `Menu`/`GroupMenu` states (§11.2, Wave 4 Task 2) in addition to the
 //! `TextInput`/`ListSelect`/`Feedback` states carried over unchanged from
-//! Wave 2 — still no `Diagnostic` arm (§6.1, reaffirmed §11.6 item 2).
-//! `draw_status`'s row 1 also gains a small `RTS: ON/OFF` indicator (Wave 4
-//! Task 4, §11.3 point 6) next to the existing `TX`/`RX` indicator —
+//! Wave 2. `draw_status`'s row 1 also gains a small `RTS: ON/OFF` indicator
+//! (Wave 4 Task 4, §11.3 point 6) next to the existing `TX`/`RX` indicator —
 //! reuses `tx_state_label`'s (label, color) rendering pattern via the new
 //! `rts_label` helper, no new render function needed. `draw_control_panel`
 //! gains one more arm for `ControlState::ExSubGroupMenu` (§11.4 path (a),
@@ -32,6 +31,16 @@
 //! first genuinely **scrolling** list in this crate (as opposed to
 //! `GroupMenu`'s fixed, never-scrolled command column), needed because `EX`
 //! sub-groups hold up to 45 items.
+//!
+//! A `Diagnostic` arm was finally added
+//! (`docs/adr/0004-shared-diagnostics-screen.md`, reversing §6.1/§11.6 item
+//! 2's earlier "not warranted yet" call now that `radio-cat-rs` ships a
+//! shared engine to back it): `draw_diagnostics_panel` is the same
+//! scrolling-list shape as `draw_ex_sub_group_menu`/`draw_profile_list`,
+//! plus `draw_diagnostics_live` (a thin wrapper adding the outer " Controls
+//! " block) for `terminal.rs` to call directly while a run is still in
+//! progress, before any `ControlState::Diagnostics` exists yet to dispatch
+//! through `draw_control_panel` normally.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -396,6 +405,7 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
         ControlState::Menu => {
             let mut items = menu_group_labels();
             items.push((crate::control::PROFILE_LIST_KEY, "Profiles"));
+            items.push((crate::control::DIAGNOSTICS_KEY, "Diagnostics"));
             items.push(('Q', "Quit"));
             f.render_widget(Paragraph::new(build_menu_column(&items)), inner);
         }
@@ -436,6 +446,16 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
             error,
         } => {
             draw_profile_list(f, inner, profiles, *cursor, error.as_deref());
+        }
+
+        // Diagnostics (`docs/adr/0004-shared-diagnostics-screen.md`) — the
+        // completed-report browsing view. Live in-progress rendering
+        // during the run itself is drawn directly by `terminal.rs` (which
+        // calls `draw_diagnostics_panel` itself, with `cursor: None`,
+        // before `ControlState::Diagnostics` even exists) — see that
+        // function's own doc comment.
+        ControlState::Diagnostics { summary, cursor } => {
+            draw_diagnostics_panel(f, inner, &summary.outcomes, summary.total(), Some(*cursor));
         }
 
         // For input/selection/feedback states, use the same 3-line layout
@@ -535,12 +555,13 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                     f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
                 }
 
-                // Menu, GroupMenu, ExSubGroupMenu, and ProfileList are
-                // handled above.
+                // Menu, GroupMenu, ExSubGroupMenu, ProfileList, and
+                // Diagnostics are handled above.
                 ControlState::Menu
                 | ControlState::GroupMenu { .. }
                 | ControlState::ExSubGroupMenu { .. }
-                | ControlState::ProfileList { .. } => {}
+                | ControlState::ProfileList { .. }
+                | ControlState::Diagnostics { .. } => {}
             }
         }
     }
@@ -699,6 +720,176 @@ fn draw_profile_list(
     ]));
 
     f.render_widget(Paragraph::new(lines), area);
+}
+
+// ---------------------------------------------------------------------------
+// draw_diagnostics_panel — `docs/adr/0004-shared-diagnostics-screen.md`
+// ---------------------------------------------------------------------------
+
+/// One-line (status glyph, color) pair for a [`radio::DiagnosticResult`],
+/// mirroring [`tx_state_label`]/[`rts_label`]'s own (text, color) idiom.
+fn diagnostic_result_label(result: &radio::DiagnosticResult) -> (&'static str, Color) {
+    match result {
+        radio::DiagnosticResult::Success { .. } => ("OK", Color::Green),
+        radio::DiagnosticResult::Failure { .. } => ("FAIL", Color::Red),
+        radio::DiagnosticResult::Timeout => ("TIMEOUT", Color::Red),
+        radio::DiagnosticResult::Skipped { .. } => ("SKIP", Color::DarkGray),
+    }
+}
+
+/// Draw the diagnostics screen: same scrolling-list shape as
+/// [`draw_profile_list`]/[`draw_ex_sub_group_menu`], since
+/// [`radio::FT991A_COMMAND_TABLE`] has 90+ entries.
+///
+/// Serves **two** call sites with one shared rendering function:
+/// - **Live progress**, called directly by `terminal.rs`'s diagnostics
+///   runner (`cursor: None`) once per [`radio::DiagnosticOutcome`] as the
+///   run proceeds — `outcomes` is a growing prefix of the final list,
+///   `total` is [`radio::FT991A_COMMAND_TABLE`]'s full length (known
+///   up-front, unlike `outcomes.len()`), and the view auto-scrolls to
+///   follow the most recent result.
+/// - **The completed report**, via `draw_control_panel`'s
+///   `ControlState::Diagnostics` arm (`cursor: Some(n)`) — `outcomes` is
+///   now the final, complete list (`outcomes.len() == total`), and the
+///   view scrolls around `cursor` like [`draw_profile_list`] instead of
+///   auto-following the tail.
+pub(crate) fn draw_diagnostics_panel(
+    f: &mut Frame,
+    area: Rect,
+    outcomes: &[radio::DiagnosticOutcome],
+    total: usize,
+    cursor: Option<usize>,
+) {
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let hint_style = Style::default().fg(Color::DarkGray);
+    let selected_style = Style::default().add_modifier(Modifier::BOLD);
+
+    let running = outcomes.len() < total;
+    let header = if running {
+        format!("Running diagnostics... ({}/{total})", outcomes.len())
+    } else {
+        let passed = outcomes.iter().filter(|o| o.result.is_success()).count();
+        let failed = outcomes
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o.result,
+                    radio::DiagnosticResult::Failure { .. } | radio::DiagnosticResult::Timeout
+                )
+            })
+            .count();
+        let skipped = outcomes
+            .iter()
+            .filter(|o| matches!(o.result, radio::DiagnosticResult::Skipped { .. }))
+            .count();
+        format!(
+            "Diagnostics — {passed} passed / {failed} failed / {skipped} skipped / {total} total"
+        )
+    };
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(header, header_style))];
+    lines.push(Line::from(""));
+
+    let visible = (area.height as usize).saturating_sub(4).max(1);
+    let start = match cursor {
+        // Completed report: scroll around the cursor, like `draw_profile_list`.
+        Some(cursor) if outcomes.len() > visible => cursor
+            .saturating_sub(visible / 2)
+            .min(outcomes.len() - visible),
+        Some(_) => 0,
+        // Live progress: always follow the tail (most recent outcome).
+        None => outcomes.len().saturating_sub(visible),
+    };
+    let end = (start + visible).min(outcomes.len());
+
+    for (idx, outcome) in outcomes[start..end].iter().enumerate() {
+        let idx = start + idx;
+        let (status_text, status_color) = diagnostic_result_label(&outcome.result);
+        let is_selected = cursor == Some(idx);
+        let prefix = if is_selected { "> " } else { "  " };
+        let mut spans = vec![
+            Span::raw(prefix),
+            Span::styled(
+                format!("[{status_text:>7}]"),
+                Style::default().fg(status_color),
+            ),
+            Span::raw(format!(" {:<3} {}", outcome.code, outcome.name)),
+        ];
+        if is_selected {
+            spans = spans
+                .into_iter()
+                .map(|s| {
+                    let style = s.style.patch(selected_style);
+                    s.style(style)
+                })
+                .collect();
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Detail line for the currently-selected outcome (completed report
+    // only — nothing to show yet while a live run is still in progress and
+    // no row is selectable).
+    if let Some(cursor) = cursor {
+        if let Some(outcome) = outcomes.get(cursor) {
+            lines.push(Line::from(""));
+            let detail = match &outcome.result {
+                radio::DiagnosticResult::Success { response } => {
+                    format!("Request: {}  Response: {}", outcome.request, response)
+                }
+                radio::DiagnosticResult::Failure { message } => {
+                    format!("Request: {}  Error: {}", outcome.request, message)
+                }
+                radio::DiagnosticResult::Timeout => {
+                    format!("Request: {}  (no response)", outcome.request)
+                }
+                radio::DiagnosticResult::Skipped { reason } => format!("Skipped: {reason}"),
+            };
+            lines.push(Line::from(Span::styled(detail, hint_style)));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(if running {
+        Line::from(Span::styled(
+            "Please wait — exercising every CAT command...",
+            hint_style,
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("[Up/Down]", key_style),
+            Span::styled(" scroll  ", hint_style),
+            Span::styled("[Esc]", key_style),
+            Span::styled(" back", hint_style),
+        ])
+    });
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Draw the diagnostics screen's live-progress frame, including the same
+/// bordered " Controls " outer block [`draw_control_panel`] itself draws —
+/// called directly by `terminal.rs`'s diagnostics runner while a run is
+/// still in progress (before any `ControlState::Diagnostics` exists to
+/// dispatch through [`draw_control_panel`] normally). A few lines of
+/// duplication against that function's own outer-block setup, traded for
+/// keeping all rendering logic (including this "how do we draw a running
+/// diagnostics screen" concern) inside this module rather than leaking
+/// `ratatui::widgets::Block` construction into `terminal.rs`.
+pub(crate) fn draw_diagnostics_live(
+    f: &mut Frame,
+    area: Rect,
+    outcomes: &[radio::DiagnosticOutcome],
+    total: usize,
+) {
+    let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+    draw_diagnostics_panel(f, inner, outcomes, total, None);
 }
 
 // ---------------------------------------------------------------------------

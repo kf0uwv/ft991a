@@ -159,6 +159,23 @@ pub(crate) const EX_NUMBER_ENTRY_KEY: char = 'N';
 /// `Q`/[`EX_NUMBER_ENTRY_KEY`] by `test_profile_list_key_is_unique`.
 pub(crate) const PROFILE_LIST_KEY: char = 'L';
 
+/// The `Menu`-level keybinding for the shared diagnostics screen
+/// (`docs/adr/0004-shared-diagnostics-screen.md`) — a cross-cutting action
+/// that exercises the whole [`radio::FT991A_COMMAND_TABLE`], not a
+/// [`CommandGroup`], so it lives alongside [`PROFILE_LIST_KEY`]/
+/// [`EX_NUMBER_ENTRY_KEY`] as its own top-level escape hatch rather than as
+/// a 13th group — same reasoning as `PROFILE_LIST_KEY`'s own doc comment.
+/// `'D'` (mnemonic: "Diagnostics," matching `ts570d`'s own `[D]` screen) —
+/// verified unique against every [`ALL_GROUPS`] key plus `Q`/
+/// [`EX_NUMBER_ENTRY_KEY`]/[`PROFILE_LIST_KEY`] by
+/// `test_diagnostics_key_is_unique` below. Unlike `PROFILE_LIST_KEY`,
+/// pressing this key does not by itself produce a `ControlState`
+/// transition — running diagnostics needs live radio access `handle_key`
+/// deliberately never has (see [`KeyResult::RunDiagnostics`]'s doc
+/// comment), so `terminal.rs`'s event loop performs the actual run and
+/// transitions to [`ControlState::Diagnostics`] itself once it completes.
+pub(crate) const DIAGNOSTICS_KEY: char = 'D';
+
 /// Return the `(key, label)` pairs for rendering the `Menu` screen's group
 /// list. Does not include the fixed `[Q] Quit` entry — see
 /// `layout::draw_control_panel`.
@@ -743,6 +760,20 @@ pub enum ControlState {
         cursor: usize,
         error: Option<String>,
     },
+    /// Showing a completed diagnostics run's per-command results
+    /// (`docs/adr/0004-shared-diagnostics-screen.md`), reachable from
+    /// `Menu` via [`DIAGNOSTICS_KEY`]. Unlike every other `ControlState`
+    /// transition, `handle_key` never constructs this variant itself —
+    /// only `terminal.rs`'s event loop does, once
+    /// [`radio::Ft991aExtras::run_diagnostics_with`] has actually
+    /// completed (see [`KeyResult::RunDiagnostics`]'s doc comment).
+    /// `cursor` scrolls through `summary.outcomes` like `ExSubGroupMenu`/
+    /// `ProfileList`'s own cursors (up to 91+ rows, well past a single
+    /// screen). `Esc` -> `Menu`.
+    Diagnostics {
+        summary: radio::DiagnosticSummary,
+        cursor: usize,
+    },
     /// User is typing text input.
     TextInput {
         prompt: String,
@@ -773,6 +804,24 @@ pub enum KeyResult {
     Quit,
     /// Execute a radio action with a validated value.
     Execute(ExecuteAction),
+    /// Run the shared diagnostics engine
+    /// (`docs/adr/0004-shared-diagnostics-screen.md`) and, once it
+    /// completes, transition to [`ControlState::Diagnostics`].
+    ///
+    /// Deliberately **not** folded into [`Self::Execute`] /
+    /// [`ExecuteAction`]: every `ExecuteAction` maps to one bounded
+    /// `terminal.rs::execute_action` call producing a single `(desc,
+    /// RadioResult<String>)` pair, rendered as one `ControlState::Feedback`
+    /// screen. A diagnostics run is qualitatively different — dozens of
+    /// individual command probes, each worth showing live progress for as
+    /// it happens (mirroring `ts570d`'s own diagnostics screen) — so it
+    /// gets its own `KeyResult` variant, letting `terminal.rs`'s event
+    /// loop drive it with direct, repeated `Terminal::draw` calls between
+    /// probes instead of the single opaque `execute_action` call every
+    /// other action uses. `handle_key` itself stays synchronous and
+    /// radio-free (per its own signature); only `terminal.rs` (which
+    /// already holds both `radio` and `terminal`) can act on this.
+    RunDiagnostics,
 }
 
 // ---------------------------------------------------------------------------
@@ -3531,6 +3580,12 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
                 };
                 KeyResult::Continue
             }
+            KeyCode::Char(c) if c.to_ascii_uppercase() == DIAGNOSTICS_KEY => {
+                // No state transition here — see `KeyResult::RunDiagnostics`'s
+                // doc comment for why `terminal.rs` performs the actual run
+                // and transition, not `handle_key`.
+                KeyResult::RunDiagnostics
+            }
             KeyCode::Char(c) if c.to_ascii_uppercase() == PROFILE_LIST_KEY => {
                 let dir = radio::default_profile_dir();
                 let (profiles, errors) = match &dir {
@@ -3685,6 +3740,27 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
                     is_error: false,
                 };
                 KeyResult::Execute(exec)
+            }
+            KeyCode::Esc => {
+                *state = ControlState::Menu;
+                KeyResult::Continue
+            }
+            _ => KeyResult::Continue,
+        },
+
+        ControlState::Diagnostics { summary, cursor } => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if *cursor > 0 {
+                    *cursor -= 1;
+                }
+                KeyResult::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = summary.outcomes.len().saturating_sub(1);
+                if *cursor < max {
+                    *cursor += 1;
+                }
+                KeyResult::Continue
             }
             KeyCode::Esc => {
                 *state = ControlState::Menu;
@@ -8864,6 +8940,117 @@ mod tests {
             profiles: sample_profiles(),
             cursor: 0,
             error: None,
+        };
+        let result = handle_key(key(KeyCode::Esc), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostics (`docs/adr/0004-shared-diagnostics-screen.md`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_diagnostics_key_is_unique() {
+        let mut keys: Vec<char> = ALL_GROUPS.iter().map(|&g| group_key(g)).collect();
+        keys.push('Q');
+        keys.push(EX_NUMBER_ENTRY_KEY);
+        keys.push(PROFILE_LIST_KEY);
+        keys.push(DIAGNOSTICS_KEY);
+        let before = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            before,
+            "DIAGNOSTICS_KEY must not collide with any group key, Quit, EX_NUMBER_ENTRY_KEY, or PROFILE_LIST_KEY"
+        );
+    }
+
+    #[test]
+    fn test_menu_diagnostics_key_produces_run_diagnostics_without_state_change() {
+        // Unlike every other `Menu`-level escape hatch, this key does NOT
+        // transition `state` itself — see `KeyResult::RunDiagnostics`'s doc
+        // comment for why (`handle_key` has no radio access to actually run
+        // the engine; `terminal.rs` does that and transitions afterward).
+        let mut state = ControlState::Menu;
+        let result = handle_key(key(KeyCode::Char(DIAGNOSTICS_KEY)), &mut state, &display());
+        assert_eq!(result, KeyResult::RunDiagnostics);
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn test_menu_diagnostics_key_is_case_insensitive() {
+        let mut state = ControlState::Menu;
+        let result = handle_key(
+            key(KeyCode::Char(DIAGNOSTICS_KEY.to_ascii_lowercase())),
+            &mut state,
+            &display(),
+        );
+        assert_eq!(result, KeyResult::RunDiagnostics);
+    }
+
+    fn sample_diagnostic_summary() -> radio::DiagnosticSummary {
+        radio::DiagnosticSummary {
+            outcomes: vec![
+                radio::DiagnosticOutcome {
+                    code: "FA",
+                    name: "VFO A frequency",
+                    request: "FA;".to_string(),
+                    result: radio::DiagnosticResult::Success {
+                        response: "FA00014250000;".to_string(),
+                    },
+                    latency: std::time::Duration::from_millis(5),
+                },
+                radio::DiagnosticOutcome {
+                    code: "TX",
+                    name: "Transmit",
+                    request: String::new(),
+                    result: radio::DiagnosticResult::Skipped {
+                        reason: "write-only",
+                    },
+                    latency: std::time::Duration::ZERO,
+                },
+                radio::DiagnosticOutcome {
+                    code: "XX",
+                    name: "Bogus",
+                    request: "XX;".to_string(),
+                    result: radio::DiagnosticResult::Failure {
+                        message: "boom".to_string(),
+                    },
+                    latency: std::time::Duration::from_millis(10),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_diagnostics_cursor_scrolls_up_and_down_within_bounds() {
+        let mut state = ControlState::Diagnostics {
+            summary: sample_diagnostic_summary(),
+            cursor: 0,
+        };
+        // Up at the top is a no-op.
+        handle_key(key(KeyCode::Up), &mut state, &display());
+        assert!(matches!(state, ControlState::Diagnostics { cursor: 0, .. }));
+
+        handle_key(key(KeyCode::Down), &mut state, &display());
+        assert!(matches!(state, ControlState::Diagnostics { cursor: 1, .. }));
+        handle_key(key(KeyCode::Down), &mut state, &display());
+        assert!(matches!(state, ControlState::Diagnostics { cursor: 2, .. }));
+        // Down at the bottom (3 outcomes, max index 2) is a no-op.
+        handle_key(key(KeyCode::Down), &mut state, &display());
+        assert!(matches!(state, ControlState::Diagnostics { cursor: 2, .. }));
+
+        handle_key(key(KeyCode::Up), &mut state, &display());
+        assert!(matches!(state, ControlState::Diagnostics { cursor: 1, .. }));
+    }
+
+    #[test]
+    fn test_diagnostics_esc_returns_to_menu() {
+        let mut state = ControlState::Diagnostics {
+            summary: sample_diagnostic_summary(),
+            cursor: 1,
         };
         let result = handle_key(key(KeyCode::Esc), &mut state, &display());
         assert_eq!(result, KeyResult::Continue);

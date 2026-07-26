@@ -24,6 +24,26 @@ the Yaesu FT-991A HF/VHF/UHF transceiver, written in Rust.
   own live TUI, for developing and testing without real hardware.
 - **Linux and Windows** — native io_uring serial I/O on Linux, native Win32
   COM-port I/O on Windows (see [Platform support](#platform-support)).
+- **Headless network server mode** (`ft991a server ...`, Linux only) — one
+  process owns the physical serial port, exposed to WSJT-X (a Hamlib
+  rigctld-compatible TCP listener) and/or other `radio-cat-rs`-aware
+  clients (raw TCP/UDP) at the same time.
+- **Remote TCP client mode** (`ft991a --server <host:port>`, Linux and
+  Windows) — connects the normal control TUI to a remote `ft991a server`'s
+  raw TCP listener instead of a local serial port.
+- **Shared diagnostics screen** (`[D]` in the main menu) — exercises every
+  command in the FT-991A command table and reports pass/fail/timeout/
+  skipped with live per-command progress and per-row latency/detail.
+
+## Platform support at a glance
+
+| Feature | Linux | Windows |
+|---|---|---|
+| `--port` (local serial) | yes | yes |
+| `--server <host:port>` (TCP client) | yes | yes |
+| `server ...` (headless network server) | yes | no — depends on `cat-rigctl`, which has no Windows backend upstream yet |
+| Diagnostics screen (`[D]`) | yes | yes |
+| Built-in emulator | yes | no (PTY-only, Unix-specific) |
 
 ## Installing
 
@@ -57,8 +77,41 @@ cargo run --bin ft991a -- --port <path> --baud 9600
 own default). `--stop-bits` accepts 1 or 2 (default 2).
 
 Once running, press a bracketed key from the main menu to enter a command
-group, `[E]` for the `EX` settings menu, `[Q]` to quit. Each screen shows its
+group, `[E]` for the `EX` settings menu, `[D]` to run the diagnostics
+screen, `[L]` for settings profiles, `[Q]` to quit. Each screen shows its
 own keybindings.
+
+### Headless network server mode (Linux only)
+
+```sh
+ft991a server --port /dev/ttyUSB0 --rigctl-port 4532 --raw-tcp-port 7300
+```
+
+One process owns the physical serial port; `--rigctl-port` exposes a
+Hamlib rigctld-compatible TCP listener (for WSJT-X's "Hamlib NET rigctl"
+rig type), `--raw-tcp-port`/`--raw-udp-port` expose `radio-cat-rs`'s raw
+protocols for other clients. At least one of the three is required.
+
+### Remote TCP client mode
+
+```sh
+ft991a --server 192.168.1.50:7300     # connects to a remote `ft991a server --raw-tcp-port`
+```
+
+Runs the normal control TUI against a remote server's raw TCP listener
+instead of a local serial port — mutually exclusive with `--port`.
+Available on both Linux and Windows.
+
+### Packaging
+
+```sh
+./packaging/build-deb.sh          # Linux: ft991a-radio-control_<version>_amd64.deb
+pwsh ./packaging/build-windows-package.ps1   # Windows: a zip in the repo root
+```
+
+Both scripts run `cargo build --release` first unless passed
+`--skip-build` (Debian script only; used by the shared CI release
+workflow, see `docs/adr/0005-debian-and-windows-packaging.md`).
 
 ## Architecture
 
@@ -66,12 +119,22 @@ own keybindings.
 radio/       Ft991aCommandId, FT991A_COMMAND_TABLE (91 commands),
              EX_MENU_TABLE (151 settings items), Ft991aRadio (protocol
              state machine), Radio/Ft991aExtras/CwKeying traits, and
-             Ft991a<S: CatSession>, the typed controller client.
-ui/          Ratatui/crossterm terminal interface. Depends on radio only.
+             Ft991a<S: CatSession>, the typed controller client. Also
+             wraps radio-cat-rs's shared cat-diagnostics engine behind
+             Ft991aExtras::run_diagnostics_with (see docs/adr/0004).
+ui/          Ratatui/crossterm terminal interface. Depends on radio only —
+             including for the diagnostics screen, which never depends on
+             cat-diagnostics itself (see docs/adr/0004).
 emulator/    PTY-hosted FT-991A simulator with its own TUI, for testing
-             without hardware.
+             without hardware. Linux/Unix-only.
+server/      Headless network server mode (ft991a server ...). Linux only
+             — wraps radio-cat-rs's cat-rigctl, which has no Windows
+             backend yet (see docs/adr/0003).
 src/         Application wiring — the only place a concrete transport type
              is named, and the platform-specific entry point.
+packaging/   Debian (.deb) and Windows (.zip) packaging scripts, consumed
+             by both local use and radio-cat-rs's shared release workflow
+             (see docs/adr/0005).
 ```
 
 `radio` implements what a command *means* (FT-991A protocol semantics, state,
