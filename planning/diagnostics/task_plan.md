@@ -25,6 +25,21 @@ safety net, matching ts570d/ui/src/terminal.rs's standard of care.
 14. [ ] Final commits + report
 
 ## Decisions Log
-(fill in as made)
+- Single pass (no rounds), DIAG_STEP_COUNT=114, verified against real output via test.
+- RD/RU confirmed absolute sets (not relative) -> exact clarifier restore possible.
+- KY is keyer-memory playback, not raw text send -> gated behind DiagWarning +
+  DiagCwCallsign prompt (mirrors ts570d's independently-landed ADR 0007), sends
+  "TEST <CALLSIGN>", Skipped (not aborted) if blank.
+- VM conditionally Skipped only when get_information().select not in {0,1}.
+- AC/MX/DVS deliberately kept get-only (out of the 28-command scope, real
+  RF/physical side effects).
+- radio crate: removed diagnostics.rs, run_diagnostics_with, cat-diagnostics dep entirely.
+- New ui/src/diagnostics.rs (data model) + terminal.rs (engine), mirroring ts570d's
+  file split.
 
-## Status: in progress
+## Status: COMPLETE
+All phases done: radio cleanup, engine implementation (114 steps covering all 91
+commands incl. 28 previously-skipped), DiagWarning/DiagCwCallsign safety gate,
+ADR 0006 written, fmt/clippy/test/windows-check all green, live emulator
+verification done (114/114 with callsign, 113/1/0/114 blank, zero KY on wire when
+blank, byte-for-byte state restore confirmed). Committed in 4 commits on main.
