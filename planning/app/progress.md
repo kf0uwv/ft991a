@@ -290,3 +290,54 @@ Committed locally (not pushed) — see final report for the commit hash.
 Staged only the files listed above; left the pre-existing unrelated
 `src/main.rs`/`CLAUDE.md` changes (from an earlier task this session)
 uncommitted, exactly as found.
+
+## Wave 5 Task — complete (real-emulator integration test suite, 2026-07-26)
+
+Goal: ts570d has `tests/integration.rs`, a 100-test suite that opens a real
+`SerialPort` on a real PTY-hosted emulator and exercises the full CAT
+command surface end-to-end; ft991a had no equivalent (only in-crate unit
+tests against fakes). Added `tests/integration.rs`: 103 tests, same
+`start_emulator`/`open_radio`/`make_runtime`/`async_test!` helper shape as
+ts570d's, one hand-written test per `radio::Radio`/`Ft991aExtras` method
+(mirroring ts570d's per-command style, per architect direction) plus one
+generic, table-driven test iterating the full 151-item `EX_MENU_TABLE`
+(`ex_menu_round_trips_every_landed_item`, computing two legal values per
+item generically from its own `ExMenuValueKind` rather than 151 hand-copied
+functions — ft991a's EX menu has no ts570d equivalent to mirror per-item).
+
+**Real bug found and fixed, not just a test-writing exercise**: first run
+was 101/103 — one failure was this agent's own test-arithmetic mistake
+(`test_memory_channel_up_and_down`, fixed), but
+`test_write_then_read_memory_channel_tag` surfaced a genuine bug.
+Root-caused via a temporary raw-wire-tracing example (removed before
+finishing) plus temporary debug `eprintln!`s in `radio/src/ft991a_radio.rs`
+(also removed): `emulator/src/io.rs`'s `CommandFramer::drain_commands()`
+called a plain `.trim()` on every extracted command, which silently
+stripped the legitimate trailing ASCII spaces from `MT`'s fixed-width,
+space-padded 12-byte tag field (any tag under 12 characters) — shortening
+the parameter width so it matched none of `MT`'s declared `CommandForm`s,
+so the framework rejected it as malformed *before* even reaching
+`Ft991aRadio::handle_command`. Because `write_memory_channel_tag` uses the
+fire-and-forget `send()` path (real Set commands normally get zero
+response bytes), that rejection's `?;` response was never read and sat in
+the stream, corrupting the *next* command's response instead of the
+write's own — a session-desyncing bug, not just a wrong answer to one
+command. Fixed by replacing `.trim()` with
+`.trim_matches(|c: char| c.is_ascii_control())` (strips real line-ending
+noise like `\r`/`\n`, never spaces, since printable-ASCII space is always
+legitimate CAT wire content per the manual's own parameter rule). Added
+two regression tests directly in `emulator/src/io.rs`'s own test module
+(`test_framer_preserves_trailing_spaces_in_command_content`,
+`test_framer_still_strips_control_characters`).
+
+Verification, all clean: `cargo build/test/clippy(-D warnings)/fmt
+--check --workspace`, `cargo check --target x86_64-pc-windows-gnu -p
+ft991a`. Emulator crate: 24/24 (22 pre-existing + 2 new). Full workspace:
+533+8+434+103+... all green, no regressions elsewhere.
+
+Committed locally (not pushed): one commit for the `tests/integration.rs`
+addition + `test_memory_channel_up_and_down` fix, staged separately from
+the `emulator/src/io.rs` bugfix (kept as two commits — the emulator fix is
+a real behavior change worth its own history entry, distinct from "added
+tests"). Left the pre-existing unrelated `src/main.rs`/`CLAUDE.md`/root
+`Cargo.toml` changes uncommitted, exactly as found.
