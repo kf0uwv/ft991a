@@ -28,15 +28,38 @@
   Hamlib rigctld-compatible TCP listener for WSJT-X's "Hamlib NET rigctl"
   rig type, plus the existing raw `cat-server` TCP/UDP protocols for other
   `radio-cat-rs`-aware clients. Verified end-to-end against the live
-  `emulator` — see `planning/architect/task_plan.md` §12.2/§12.4. The
-  rigctld command translation (§12.2) has not been validated against a
-  real WSJT-X instance; treat it as a first cut.
+  `emulator` — see `planning/architect/task_plan.md` §12.2/§12.4.
   **`radio-cat-rs` bug found and fixed during this verification** (§12.4):
   `cat-server`'s broker silently dropped the response to any "selector
   read" command (`MD`, the whole `EX` menu, and ~23 others) that is also
   writable — fixed upstream via a new `CommandForm::selector_read`
   marker (`radio-cat-rs@889591b`, pushed to `main`) and picked up here as
   a plain `branch = "main"` git dependency update, no `[patch]` needed.
+  The rigctld command translation (§12.2) has since been validated
+  against a real Hamlib client (`rigctl -m 2`, the same `netrigctl.c`
+  backend WSJT-X's "Hamlib NET rigctl" rig type uses), which surfaced and
+  fixed two more bugs: `\dump_state`'s capability tail was two fields
+  short (`has_get_parm`/`has_set_parm` missing, hanging the client's
+  handshake), and `F` (set frequency) only parsed a bare integer where
+  Hamlib always sends a `%f`-formatted float (e.g. `F 14074000.000000`).
+  Not yet validated against WSJT-X itself, only against the Hamlib
+  library it's built on.
+- `ft991a --server <host:port>` (TCP client mode, Linux-only) connects the
+  normal control/TUI program to a *remote* `ft991a server`'s raw
+  `--raw-tcp-port` listener instead of opening a local serial port —
+  mutually exclusive with `--port`. New `TcpClientSession` adapter in
+  `src/main.rs` wraps `radio-cat-rs`'s `cat-transport-tcp::TcpCatSession`
+  to satisfy `Ft991a<S>`'s `CatSession<Error = TransportError>` bound
+  (mirrors `server/src/broker_session.rs::BrokerCatSession`), plus an
+  honest-error `ModemControlLines` impl (TCP has no RTS/DTR) so
+  `Ft991a<TcpClientSession>` still satisfies `ui::run`'s unconditional
+  `CwKeying` bound. Gated to Linux because `cat-transport-tcp` itself has
+  no Windows backend upstream (unlike `cat-transport-serial` post-ADR
+  0004) — confirmed this gating keeps `cargo check --target
+  x86_64-pc-windows-gnu -p ft991a` green. Verified end-to-end: TUI driven
+  live (via tmux) against `ft991a server --raw-tcp-port` backed by the
+  `emulator`, including a real VFO frequency write landing through the
+  full stack. See `planning/app/task_plan.md`'s Wave 4 task.
 
 See `docs/adr/0001-second-radio-on-shared-cat-framework.md` and
 `docs/adr/0002-rts-dtr-ptt-cw-keying.md` for the design record, and

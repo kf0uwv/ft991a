@@ -30,13 +30,21 @@ use radio::{Ft991a, Profile};
 
 /// Parsed command-line arguments.
 struct Args {
-    port: String,
+    /// `--port <path>` — open a local serial port. Mutually exclusive with
+    /// `server`; exactly one of the two is required.
+    port: Option<String>,
     baud: u32,
     stop_bits: u8,
     /// `--profile <name>` (`planning/architect/task_plan.md` §12.3) —
     /// looked up by name in [`radio::default_profile_dir`] and applied once,
     /// right after connecting, before the UI event loop starts.
     profile: Option<String>,
+    /// `--server <host:port>` — connect over TCP to a remote `ft991a
+    /// server --raw-tcp-port <n>` instance's `cat-server` raw listener
+    /// instead of opening a local serial port (`planning/app/task_plan.md`'s
+    /// Wave 4 task). Mutually exclusive with `port`; Linux-only (see
+    /// [`run_over_tcp`]'s doc comment).
+    server: Option<String>,
 }
 
 /// Print usage and exit with code 1.
@@ -44,10 +52,20 @@ fn usage_exit() -> ! {
     eprintln!(
         "Usage: ft991a --port <serial-port-path> [--baud <rate>] [--stop-bits <n>] [--profile <name>]\n\
          \n\
-           --port      Serial port path (required)\n\
+           --port      Serial port path — connect directly to a\n\
+                       physically-attached radio (required unless --server\n\
+                       is given; mutually exclusive with it)\n\
                        Examples: /dev/pts/5  /dev/ttyUSB0\n\
            --baud      Baud rate: 4800, 9600, 19200, 38400  (default: 9600)\n\
+                       (only applies with --port; ignored with --server —\n\
+                       the remote `ft991a server` process owns that)\n\
            --stop-bits Stop bits: 1 or 2                    (default: 2)\n\
+                       (only applies with --port; ignored with --server)\n\
+           --server    <host:port> of a remote `ft991a server\n\
+                       --raw-tcp-port <n>` instance — connect over TCP\n\
+                       instead of opening a local serial port (required\n\
+                       unless --port is given; mutually exclusive with it;\n\
+                       Linux-only)\n\
            --profile   Name of a settings profile to apply on startup\n\
                        (looked up in the default profile directory, e.g.\n\
                        ~/.config/ft991a/profiles/<name>.toml on Linux)"
@@ -55,13 +73,15 @@ fn usage_exit() -> ! {
     std::process::exit(1);
 }
 
-/// Parse `--port <path>`, `--baud <rate>`, `--stop-bits <n>`, and
-/// `--profile <name>` from `std::env::args()`.  Unknown flags are silently
-/// ignored.  Exits with an error message and code 1 for missing or invalid
-/// values.
+/// Parse `--port <path>`, `--baud <rate>`, `--stop-bits <n>`, `--server
+/// <host:port>`, and `--profile <name>` from `std::env::args()`.  Unknown
+/// flags are silently ignored.  Exits with an error message and code 1 for
+/// missing or invalid values, or if `--port`/`--server` are both given or
+/// both omitted.
 fn parse_args() -> Args {
     let mut args_iter = std::env::args().skip(1);
     let mut port: Option<String> = None;
+    let mut server: Option<String> = None;
     let mut profile: Option<String> = None;
     // FT-991A CAT baud rate default (9600) and choice set (4800/9600/
     // 19200/38400) per the manual's Menu items 029 "232C RATE" / 031
@@ -127,19 +147,31 @@ fn parse_args() -> Args {
                     std::process::exit(1);
                 }
             },
+            Some("--server") => match args_iter.next() {
+                Some(addr) => server = Some(addr),
+                None => {
+                    eprintln!("error: --server requires a value");
+                    std::process::exit(1);
+                }
+            },
             Some(_) => {}
             None => break,
         }
     }
 
-    match port {
-        Some(p) => Args {
-            port: p,
+    match (port, server) {
+        (Some(_), Some(_)) => {
+            eprintln!("error: --port and --server are mutually exclusive");
+            std::process::exit(1);
+        }
+        (None, None) => usage_exit(),
+        (port, server) => Args {
+            port,
             baud,
             stop_bits,
             profile,
+            server,
         },
-        None => usage_exit(),
     }
 }
 
@@ -353,11 +385,8 @@ async fn run_server_mode() {
 }
 
 /// The actual application logic, shared by both platform entry points below:
-/// initialize logging, parse args, open the serial port, construct the
-/// typed FT-991A client, and run the UI event loop. Platform-neutral —
-/// `SerialPort`/`SerialConfig`/`Ft991a`/`ui::run` all behave identically on
-/// Linux and Windows (see `radio-cat-rs` ADR 0004). Only *what drives this
-/// future to completion* differs per platform; see `main` below.
+/// initialize logging, parse args, connect (serial or TCP), construct the
+/// typed FT-991A client, and run the UI event loop.
 async fn run_app() {
     // 1. Initialize logging — use RUST_LOG env var to control verbosity.
     tracing_subscriber::fmt().with_env_filter("info").init();
@@ -375,12 +404,31 @@ async fn run_app() {
     // 2. Parse CLI arguments.
     let args = parse_args();
 
-    // 3. Open the port via the platform serial backend (io_uring on Linux,
-    //    a worker-thread-backed COM port on Windows — see ADR 0004). On
-    //    Linux this must be called inside an active monoio runtime because
-    //    it registers the fd with io_uring.
+    // 3. Connect, either to a local serial port or a remote `ft991a server`
+    //    over TCP (`parse_args` guarantees exactly one of `args.port`/
+    //    `args.server` is set), then run the radio + UI event loop.
+    match &args.server {
+        Some(addr) => run_over_tcp(&args, addr).await,
+        None => run_over_serial(&args).await,
+    }
+
+    info!("Application stopped");
+}
+
+/// `--port <path>` (default): open a local serial port via the platform
+/// backend (io_uring on Linux, a worker-thread-backed COM port on Windows —
+/// see ADR 0004) and connect directly to a physically-attached radio.
+/// `SerialPort`/`SerialConfig`/`Ft991a`/`ui::run` all behave identically on
+/// Linux and Windows here. On Linux this must be called inside an active
+/// monoio runtime because it registers the fd with io_uring.
+async fn run_over_serial(args: &Args) {
+    let path = args
+        .port
+        .as_deref()
+        .expect("parse_args guarantees args.port is set when args.server is None");
+
     let port = SerialPort::open(
-        &args.port,
+        path,
         SerialConfig {
             baud_rate: args.baud,
             stop_bits: args.stop_bits,
@@ -391,24 +439,148 @@ async fn run_app() {
 
     info!(
         "Serial port opened: {} @ {} baud {} stop bit(s)",
-        args.port, args.baud, args.stop_bits
+        path, args.baud, args.stop_bits
     );
 
-    // 4. Wrap in a CatSession (serial framing), then the typed FT-991A client.
     let mut radio = Ft991a::new(SerialCatSession::new(port));
 
-    // 5. Apply a startup profile, if requested (§12.3).
     if let Some(name) = &args.profile {
         apply_named_profile(&mut radio, name).await;
     }
 
-    // 6. Run the radio + UI event loop.
     if let Err(e) = ui::run(radio).await {
         eprintln!("UI error: {}", e);
         std::process::exit(1);
     }
+}
 
-    info!("Application stopped");
+/// `--server <host:port>` — connect over TCP to a remote `ft991a server
+/// --raw-tcp-port <n>` instance's `cat-server` raw listener instead of
+/// opening a local serial port (`planning/app/task_plan.md`'s Wave 4 task).
+///
+/// Linux-only: `cat-transport-tcp::TcpCatSession` is built directly on
+/// `monoio::net::TcpStream` with no Windows backend upstream in
+/// `radio-cat-rs` (unlike `cat-transport-serial`, which got a real Win32
+/// COM backend per ADR 0004) — its `Cargo.toml` only pulls in `monoio` on
+/// Linux, so this feature is gated to match, mirroring how the `server`
+/// subcommand itself is Linux-only. See [`TcpClientSession`]'s doc comment
+/// for the `Ft991a<S>` trait-bound adapter this needs.
+#[cfg(target_os = "linux")]
+async fn run_over_tcp(args: &Args, addr: &str) {
+    let session = cat_transport_tcp::TcpCatSession::connect(addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to connect to {addr}: {e}");
+            std::process::exit(1);
+        });
+
+    info!("Connected to remote CAT server at {addr}");
+
+    let mut radio = Ft991a::new(TcpClientSession::new(session));
+
+    if let Some(name) = &args.profile {
+        apply_named_profile(&mut radio, name).await;
+    }
+
+    if let Err(e) = ui::run(radio).await {
+        eprintln!("UI error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+/// Windows has no `--server` (TCP client mode) backend at all (see the
+/// Linux [`run_over_tcp`]'s doc comment for why) — fails fast with a clear
+/// message rather than silently behaving like plain `ft991a --port`.
+#[cfg(not(target_os = "linux"))]
+async fn run_over_tcp(_args: &Args, _addr: &str) {
+    eprintln!("error: `--server` (TCP client mode) is only available on Linux");
+    std::process::exit(1);
+}
+
+/// A [`cat_transport_core::CatSession`] adapter wrapping
+/// [`cat_transport_tcp::TcpCatSession`], so it can be used as the `S` in
+/// `radio::Ft991a<S>` — mirrors `server/src/broker_session.rs`'s
+/// `BrokerCatSession` exactly, and for the same reason: every `Ft991a<S>`
+/// trait impl in `radio` is bounded on `S: CatSession<Error =
+/// TransportError>` specifically, not `TcpCatSession`'s own `Error =
+/// TcpSessionError`, so a thin error-mapping wrapper is required. Lives
+/// here (the app wiring layer), never in `radio`, per this repo's Rule 2
+/// (`radio` never imports a transport crate directly).
+///
+/// Also implements [`cat_transport_core::ModemControlLines`], every method
+/// returning an honest error — TCP has no RTS/DTR concept, but `ui::run`'s
+/// `R: Radio + Ft991aExtras + CwKeying + 'static` bound requires `CwKeying`
+/// unconditionally, and `radio`'s `CwKeying` impl for `Ft991a<S>` is itself
+/// conditional on `S: ModemControlLines` (`radio/src/ft991a.rs`). Without
+/// this impl, `Ft991a<TcpClientSession>` wouldn't satisfy `ui::run`'s bound
+/// at all. Returning an error here (rather than a silent no-op success) is
+/// the same honest-failure convention `radio::CwKeying`'s own trait-level
+/// defaults already use (`Err(RadioError::NotImplemented)`) and that
+/// `server/src/rigctl.rs`'s `RPRT_ERR` uses — a user who tries to key CW
+/// over a `--server` TCP connection gets a clear error at the point of use,
+/// not a keying attempt that silently does nothing.
+#[cfg(target_os = "linux")]
+struct TcpClientSession {
+    session: cat_transport_tcp::TcpCatSession,
+}
+
+#[cfg(target_os = "linux")]
+impl TcpClientSession {
+    fn new(session: cat_transport_tcp::TcpCatSession) -> Self {
+        Self { session }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_modem_lines_unsupported() -> cat_transport_core::TransportError {
+    cat_transport_core::TransportError::Other(
+        "RTS/DTR control lines are not available over a TCP CAT connection".to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait::async_trait(?Send)]
+impl cat_transport_core::CatSession for TcpClientSession {
+    type Error = cat_transport_core::TransportError;
+
+    async fn execute(
+        &mut self,
+        request: &[u8],
+        response: &mut Vec<u8>,
+    ) -> Result<cat_transport_core::ResponseDisposition, Self::Error> {
+        self.session
+            .execute(request, response)
+            .await
+            .map_err(|e| match e {
+                cat_transport_tcp::TcpSessionError::Io(io_err) => {
+                    cat_transport_core::TransportError::Io(io_err)
+                }
+                cat_transport_tcp::TcpSessionError::FrameTooLarge { len, max } => {
+                    cat_transport_core::TransportError::Other(format!(
+                        "frame length {len} exceeds max frame size {max} bytes"
+                    ))
+                }
+            })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl cat_transport_core::ModemControlLines for TcpClientSession {
+    fn set_rts(&self, _asserted: bool) -> Result<(), cat_transport_core::TransportError> {
+        Err(tcp_modem_lines_unsupported())
+    }
+    fn set_dtr(&self, _asserted: bool) -> Result<(), cat_transport_core::TransportError> {
+        Err(tcp_modem_lines_unsupported())
+    }
+    fn read_cts(&self) -> Result<bool, cat_transport_core::TransportError> {
+        Err(tcp_modem_lines_unsupported())
+    }
+    fn read_dsr(&self) -> Result<bool, cat_transport_core::TransportError> {
+        Err(tcp_modem_lines_unsupported())
+    }
+    fn read_dcd(&self) -> Result<bool, cat_transport_core::TransportError> {
+        Err(tcp_modem_lines_unsupported())
+    }
 }
 
 /// Linux entry point. Uses monoio's io_uring runtime (single-threaded,
