@@ -44,22 +44,63 @@
   Hamlib always sends a `%f`-formatted float (e.g. `F 14074000.000000`).
   Not yet validated against WSJT-X itself, only against the Hamlib
   library it's built on.
-- `ft991a --server <host:port>` (TCP client mode, Linux-only) connects the
-  normal control/TUI program to a *remote* `ft991a server`'s raw
-  `--raw-tcp-port` listener instead of opening a local serial port —
-  mutually exclusive with `--port`. New `TcpClientSession` adapter in
-  `src/main.rs` wraps `radio-cat-rs`'s `cat-transport-tcp::TcpCatSession`
-  to satisfy `Ft991a<S>`'s `CatSession<Error = TransportError>` bound
-  (mirrors `server/src/broker_session.rs::BrokerCatSession`), plus an
-  honest-error `ModemControlLines` impl (TCP has no RTS/DTR) so
-  `Ft991a<TcpClientSession>` still satisfies `ui::run`'s unconditional
-  `CwKeying` bound. Gated to Linux because `cat-transport-tcp` itself has
-  no Windows backend upstream (unlike `cat-transport-serial` post-ADR
-  0004) — confirmed this gating keeps `cargo check --target
-  x86_64-pc-windows-gnu -p ft991a` green. Verified end-to-end: TUI driven
-  live (via tmux) against `ft991a server --raw-tcp-port` backed by the
-  `emulator`, including a real VFO frequency write landing through the
-  full stack. See `planning/app/task_plan.md`'s Wave 4 task.
+- `ft991a --server <host:port>` (TCP client mode, **now Windows-buildable
+  too** — see below) connects the normal control/TUI program to a *remote*
+  `ft991a server`'s raw `--raw-tcp-port` listener instead of opening a
+  local serial port — mutually exclusive with `--port`. `TcpClientSession`
+  adapter in `src/main.rs` wraps `radio-cat-rs`'s
+  `cat-transport-tcp::TcpCatSession` to satisfy `Ft991a<S>`'s
+  `CatSession<Error = TransportError>` bound (mirrors
+  `server/src/broker_session.rs::BrokerCatSession`); the separate "TCP has
+  no RTS/DTR" concern is handled by wrapping that adapter in
+  `radio-cat-rs`'s `cat_transport_core::NoModemControlLines` (`Ft991a::new
+  (NoModemControlLines::new(TcpClientSession::new(session)))`) so
+  `Ft991a<NoModemControlLines<TcpClientSession>>` still satisfies
+  `ui::run`'s unconditional `CwKeying` bound, replacing this app's
+  previous hand-rolled honest-error `ModemControlLines` impl (five
+  near-identical `Err(...)` bodies) — see
+  `docs/adr/0003-consume-radio-cat-rs-windows-network-transport.md`.
+  `radio-cat-rs` ADR 0006 gave `cat-transport-tcp`/`cat-transport-core` a
+  real Windows backend (same public API both platforms, no
+  `cfg`-branching needed in this app's own code anymore) — confirmed via
+  `cargo check --target x86_64-pc-windows-gnu -p ft991a`, green. Verified
+  end-to-end on Linux: TUI driven live (via tmux) against `ft991a server
+  --raw-tcp-port` backed by the `emulator`, connected cleanly with no
+  errors. See `planning/app/task_plan.md`'s Wave 4 task and
+  `planning/radio-cat-rs-sync/task_plan.md` for this round's changes.
+- `ft991a server ...` (headless network server mode) remains **Linux-only**
+  — unlike the TCP client mode above, its bottleneck is `cat-rigctl`
+  (which `server/src/lib.rs` wraps), whose listener orchestration imports
+  `monoio::net`/calls `monoio::spawn` unconditionally in source with no
+  Windows counterpart; `radio-cat-rs` ADR 0006 explicitly scoped its
+  Windows work to `cat-transport-tcp`/`cat-transport-udp`/`cat-server`
+  only, not `cat-rigctl`. Confirmed: `cargo check --target
+  x86_64-pc-windows-gnu -p cat-rigctl` (and `-p server`) fail with
+  unresolved-crate errors on every `monoio::` call site. Lifting this is a
+  `radio-cat-rs`/`cat-rigctl` follow-on, out of this repo's scope.
+- A shared, radio-generic **diagnostics screen** (`[D]` in the main menu)
+  invokes `radio-cat-rs`'s new `cat-diagnostics` crate
+  (`cat_diagnostics::run_diagnostics_with`) against
+  `radio::FT991A_COMMAND_TABLE` through the existing `Ft991a<S>` client,
+  and renders the resulting `DiagnosticReport` (per-command pass/fail/
+  timeout/skipped + latency + totals) live as it runs. Unlike `ts570d`'s
+  own diagnostics screen, this is **liveness-only** (issues each command's
+  documented read form and checks it answers without error) not
+  set/get value-correctness — see `docs/adr/0004-shared-diagnostics-
+  screen.md` for why, and for why `ui` depending on
+  `cat-diagnostics` directly does not violate this repo's "`ui` never
+  imports a transport crate" rule (`cat-diagnostics` is radio-generic, not
+  a transport crate — it depends on `cat-framework`/`cat-client`/
+  `cat-transport-core` only, the same tier `cat-client` itself sits at).
+- Packaging: `packaging/build-deb.sh` builds a `ft991a-radio-control` `.deb`
+  (mirrors `ts570d`'s script), and `packaging/build-windows-package.ps1`
+  produces a Windows zip package, both consumed by radio-cat-rs's shared
+  `.github/workflows/release-app.yml` (that sibling repo's own ADR 0008)
+  via this repo's own thin `.github/workflows/release.yml` caller.
+  `.github/workflows/ci.yml` runs fmt/clippy/tests on `ubuntu-latest` plus
+  a Windows cross-check job. The release caller will not actually resolve
+  until a human pushes `radio-cat-rs`'s `main` branch — expected, not a
+  bug here. See `docs/adr/0005-debian-and-windows-packaging.md`.
 
 See `docs/adr/0001-second-radio-on-shared-cat-framework.md` and
 `docs/adr/0002-rts-dtr-ptt-cw-keying.md` for the design record, and

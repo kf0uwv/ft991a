@@ -135,15 +135,21 @@ tracing-subscriber = { workspace = true }
 libc = { workspace = true }
 
 # CAT transport crate — provides SerialCatSession/SerialConfig/SerialPort,
-# used unconditionally (Windows-buildable per ADR 0004). cat-transport-tcp
-# backs `--server <host:port>` (TCP client mode) and is Linux-only today
-# (its `TcpCatSession` is built directly on `monoio::net::TcpStream`, with
-# no Windows backend upstream in radio-cat-rs the way cat-transport-serial
-# got one) — target-gated below to match, so the Windows cross-compile
-# check never tries to build it. cat-transport-core/async-trait are named
-# directly only for that same Linux-only TCP client adapter (see
-# `TcpClientSession` in main.rs) — everywhere else they're transitive.
+# used unconditionally (Windows-buildable per ADR 0004).
 cat-transport-serial = { workspace = true }
+
+# TCP client mode (`--server <host:port>`, `planning/app/task_plan.md`'s
+# Wave 4 task). Used unconditionally (Windows-buildable) as of
+# `radio-cat-rs` ADR 0006: `cat-transport-tcp::TcpCatSession` gained a real
+# Windows backend (a dedicated worker thread + the shared `completion`
+# primitive), the same shape ADR 0004 already gave
+# `cat-transport-serial` — same public API on both platforms, no
+# `cfg`-branching needed here anymore. cat-transport-core/async-trait are
+# named directly only for `TcpClientSession` (main.rs), the `Ft991a<S>`-
+# bound adapter this needs — everywhere else they're transitive.
+cat-transport-core = { workspace = true }
+cat-transport-tcp = { workspace = true }
+async-trait = { workspace = true }
 
 # Local workspace crates
 radio = { path = "radio" }
@@ -174,25 +180,22 @@ debug = true
 monoio = { workspace = true }
 # libc is already included above, unconditionally (portable itself)
 
-# Server mode (Wave 5, §12.2) — Linux-only (see `server/Cargo.toml`'s own
-# doc comment), so this is gated here rather than in the unconditional
-# `[dependencies]` above: `cargo check --target x86_64-pc-windows-gnu -p
-# ft991a` (an existing, must-keep-green command) must never try to pull it
-# in. `main.rs`'s `server` subcommand handling is itself
-# `#[cfg(target_os = "linux")]`-gated to match.
+# Server mode (Wave 5, §12.2) — still Linux-only even after `radio-cat-rs`
+# ADR 0006 gave `cat-transport-tcp`/`cat-transport-udp`/`cat-server` real
+# Windows backends: this crate's actual bottleneck is `cat-rigctl` (which
+# `server` wraps), whose own listener orchestration imports `monoio::net`/
+# calls `monoio::spawn` unconditionally in source with no Windows
+# counterpart of its own — ADR 0006 scoped its Windows work to
+# `cat-transport-tcp`/`cat-transport-udp`/`cat-server` only, not the
+# `cat-rigctl` layer on top of them (confirmed: `cargo check --target
+# x86_64-pc-windows-gnu -p cat-rigctl` fails). So this is gated here rather
+# than in the unconditional `[dependencies]` above: `cargo check --target
+# x86_64-pc-windows-gnu -p ft991a` (an existing, must-keep-green command)
+# must never try to pull it in. `main.rs`'s `server` subcommand handling is
+# itself `#[cfg(target_os = "linux")]`-gated to match. See
+# `server/src/lib.rs`'s doc comment and `run_server_mode`'s doc comment in
+# `main.rs` for the same finding in more detail.
 server = { path = "server" }
-
-# TCP client mode (`--server <host:port>`, `planning/app/task_plan.md`'s
-# Wave 4 task) — Linux-only: `cat-transport-tcp::TcpCatSession` is built
-# directly on `monoio::net::TcpStream` with no Windows backend upstream in
-# radio-cat-rs (unlike cat-transport-serial, which got a real Win32 COM
-# backend per ADR 0004), and its own Cargo.toml only pulls in `monoio` on
-# Linux — so gated here to match, same reasoning as `server` above.
-# cat-transport-core/async-trait are named directly only for
-# `TcpClientSession` (main.rs), the `Ft991a<S>`-bound adapter this needs.
-cat-transport-core = { workspace = true }
-cat-transport-tcp = { workspace = true }
-async-trait = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Test-only monoio usage (#[monoio::main]-driven smoke tests, if any land

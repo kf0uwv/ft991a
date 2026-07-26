@@ -7,16 +7,26 @@ license.workspace = true
 description = "Network server mode: one process owns the physical serial port, exposed to WSJT-X and other remote clients over TCP/UDP."
 rust-version.workspace = true
 
-# Linux-only. `cat-server` (the request broker this crate wires up) only
-# depends on `monoio` under `cfg(target_os = "linux")` — its `src/tcp.rs`/
-# `src/udp.rs` import `monoio::net` unconditionally in source, so the crate
-# fails to compile at all on a target where that dependency isn't pulled
-# in. This crate's own concurrency (accept loops, `monoio::spawn`) has the
-# exact same shape, so it is Linux-only for the same reason, not gated
-# out of caution. See `planning/architect/task_plan.md` §12.2. The root
-# `Cargo.toml` only depends on this crate from the `ft991a` binary under
-# `cfg(target_os = "linux")`, so `cargo check --target
-# x86_64-pc-windows-gnu -p ft991a` never tries to build it.
+# Linux-only. As of `radio-cat-rs` ADR 0006, `cat-server` itself (the
+# request broker) DOES compile on Windows (its `src/tcp.rs`/`src/udp.rs`
+# are now `#[cfg(target_os = "linux")]`-gated, with `tcp_windows.rs`/
+# `udp_windows.rs`/`worker_windows.rs` providing the Windows-side
+# equivalent). This crate's actual remaining bottleneck is `cat-rigctl`
+# (the rigctld bridge + listener orchestration this crate's `run()` wraps
+# via `cat_rigctl::run`): its own `src/lib.rs`/`src/rigctl.rs` import
+# `monoio::net`/call `monoio::spawn` unconditionally in source, with no
+# `cfg(target_os = "linux")` gate and no Windows counterpart at all —
+# confirmed via `cargo check --target x86_64-pc-windows-gnu -p cat-rigctl`
+# failing with unresolved-crate errors. ADR 0006 explicitly scoped its
+# Windows work to `cat-transport-tcp`/`cat-transport-udp`/`cat-server`
+# only, not the `cat-rigctl` layer built on top of them. This crate's own
+# concurrency (`#[monoio::test]`s) has the same Linux-only shape for the
+# same underlying reason. See `planning/architect/task_plan.md` §12.2. The
+# root `Cargo.toml` only depends on this crate from the `ft991a` binary
+# under `cfg(target_os = "linux")`, so `cargo check --target
+# x86_64-pc-windows-gnu -p ft991a` never tries to build it. Lifting this
+# gate for real is a `radio-cat-rs`/`cat-rigctl` follow-on, out of this
+# repo's own scope.
 
 [dependencies]
 # FT-991A command table + client + domain types — this crate is

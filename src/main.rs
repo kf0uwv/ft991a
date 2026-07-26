@@ -42,8 +42,10 @@ struct Args {
     /// `--server <host:port>` — connect over TCP to a remote `ft991a
     /// server --raw-tcp-port <n>` instance's `cat-server` raw listener
     /// instead of opening a local serial port (`planning/app/task_plan.md`'s
-    /// Wave 4 task). Mutually exclusive with `port`; Linux-only (see
-    /// [`run_over_tcp`]'s doc comment).
+    /// Wave 4 task). Mutually exclusive with `port`. Available on both
+    /// Linux and Windows (see [`run_over_tcp`]'s doc comment) since
+    /// `radio-cat-rs` ADR 0006 gave `cat-transport-tcp`/`cat-transport-core`
+    /// a Windows backend.
     server: Option<String>,
 }
 
@@ -64,8 +66,7 @@ fn usage_exit() -> ! {
            --server    <host:port> of a remote `ft991a server\n\
                        --raw-tcp-port <n>` instance — connect over TCP\n\
                        instead of opening a local serial port (required\n\
-                       unless --port is given; mutually exclusive with it;\n\
-                       Linux-only)\n\
+                       unless --port is given; mutually exclusive with it)\n\
            --profile   Name of a settings profile to apply on startup\n\
                        (looked up in the default profile directory, e.g.\n\
                        ~/.config/ft991a/profiles/<name>.toml on Linux)"
@@ -198,8 +199,9 @@ async fn apply_named_profile<R: radio::Radio + radio::Ft991aExtras>(radio: &mut 
 }
 
 /// Command-line arguments specific to `ft991a server ...`
-/// (`planning/architect/task_plan.md` §12.2). Linux-only — see
-/// [`run_server_mode`]'s doc comment.
+/// (`planning/architect/task_plan.md` §12.2). Still Linux-only — see
+/// [`run_server_mode`]'s doc comment for why `radio-cat-rs` ADR 0006 did
+/// NOT lift this particular gate (unlike `--server`/[`run_over_tcp`]).
 #[cfg(target_os = "linux")]
 struct ServerArgs {
     port: String,
@@ -336,13 +338,22 @@ fn parse_server_args() -> ServerArgs {
 /// listener) and/or other `radio-cat-rs`-aware clients (via the existing
 /// raw `cat-server` TCP/UDP listeners), instead of running the local TUI.
 ///
-/// Linux-only — the `server` crate wraps `radio-cat-rs`'s `cat-server`,
-/// which only compiles where `monoio::net`/`monoio::spawn` are available
-/// (mirrors `cat-transport-serial`'s own Windows/Linux split, except no
-/// Windows backend exists for the server side at all; see `server/
-/// Cargo.toml`'s doc comment). The root `Cargo.toml` only depends on
-/// `server` under `cfg(target_os = "linux")`, so this function's Windows
-/// counterpart below never touches that crate at all.
+/// Still Linux-only, even after `radio-cat-rs` ADR 0006 gave
+/// `cat-transport-tcp`/`cat-transport-udp`/`cat-server` real Windows
+/// backends: this crate's actual bottleneck is `cat-rigctl` (the rigctld
+/// bridge + listener orchestration `server::run` wraps), whose own
+/// `src/lib.rs`/`src/rigctl.rs` import `monoio::net`/call `monoio::spawn`
+/// **unconditionally in source**, with no `windows.rs`-shaped counterpart
+/// and no `#[cfg(target_os = "linux")]` gate of its own — confirmed by
+/// `cargo check --target x86_64-pc-windows-gnu -p cat-rigctl` failing with
+/// unresolved-crate errors on every such call site. ADR 0006 explicitly
+/// scoped its Windows work to `cat-transport-tcp`/`cat-transport-udp`/
+/// `cat-server` only; `cat-rigctl` (built on top of `cat-server`, per
+/// `cat-rigctl/Cargo.toml`'s own doc comment) was not part of it. The root
+/// `Cargo.toml` therefore still only depends on `server` under
+/// `cfg(target_os = "linux")`, so this function's Windows counterpart below
+/// never touches that crate at all. Lifting this gate for real is a
+/// `radio-cat-rs`/`cat-rigctl` follow-on, out of this repo's own scope.
 #[cfg(target_os = "linux")]
 async fn run_server_mode() {
     let args = parse_server_args();
@@ -458,14 +469,16 @@ async fn run_over_serial(args: &Args) {
 /// --raw-tcp-port <n>` instance's `cat-server` raw listener instead of
 /// opening a local serial port (`planning/app/task_plan.md`'s Wave 4 task).
 ///
-/// Linux-only: `cat-transport-tcp::TcpCatSession` is built directly on
-/// `monoio::net::TcpStream` with no Windows backend upstream in
-/// `radio-cat-rs` (unlike `cat-transport-serial`, which got a real Win32
-/// COM backend per ADR 0004) — its `Cargo.toml` only pulls in `monoio` on
-/// Linux, so this feature is gated to match, mirroring how the `server`
-/// subcommand itself is Linux-only. See [`TcpClientSession`]'s doc comment
-/// for the `Ft991a<S>` trait-bound adapter this needs.
-#[cfg(target_os = "linux")]
+/// Available on both Linux and Windows: `radio-cat-rs` ADR 0006 gave
+/// `cat-transport-tcp::TcpCatSession`/`cat-transport-core` real Windows
+/// backends (a dedicated worker thread + the shared `completion` primitive,
+/// the same shape ADR 0004 already used for `cat-transport-serial`), with
+/// the identical public `TcpCatSession::connect`/`CatSession` API on both
+/// platforms — so this function needs no platform branching of its own, and
+/// no longer has a stub Windows counterpart. See [`TcpClientSession`]'s doc
+/// comment for the `Ft991a<S>` trait-bound adapter this needs, and
+/// [`cat_transport_core::NoModemControlLines`]'s doc comment for how the
+/// (unrelated) "no RTS/DTR over TCP" gap is closed below.
 async fn run_over_tcp(args: &Args, addr: &str) {
     let session = cat_transport_tcp::TcpCatSession::connect(addr)
         .await
@@ -476,7 +489,9 @@ async fn run_over_tcp(args: &Args, addr: &str) {
 
     info!("Connected to remote CAT server at {addr}");
 
-    let mut radio = Ft991a::new(TcpClientSession::new(session));
+    let mut radio = Ft991a::new(cat_transport_core::NoModemControlLines::new(
+        TcpClientSession::new(session),
+    ));
 
     if let Some(name) = &args.profile {
         apply_named_profile(&mut radio, name).await;
@@ -486,15 +501,6 @@ async fn run_over_tcp(args: &Args, addr: &str) {
         eprintln!("UI error: {}", e);
         std::process::exit(1);
     }
-}
-
-/// Windows has no `--server` (TCP client mode) backend at all (see the
-/// Linux [`run_over_tcp`]'s doc comment for why) — fails fast with a clear
-/// message rather than silently behaving like plain `ft991a --port`.
-#[cfg(not(target_os = "linux"))]
-async fn run_over_tcp(_args: &Args, _addr: &str) {
-    eprintln!("error: `--server` (TCP client mode) is only available on Linux");
-    std::process::exit(1);
 }
 
 /// A [`cat_transport_core::CatSession`] adapter wrapping
@@ -507,38 +513,27 @@ async fn run_over_tcp(_args: &Args, _addr: &str) {
 /// here (the app wiring layer), never in `radio`, per this repo's Rule 2
 /// (`radio` never imports a transport crate directly).
 ///
-/// Also implements [`cat_transport_core::ModemControlLines`], every method
-/// returning an honest error — TCP has no RTS/DTR concept, but `ui::run`'s
-/// `R: Radio + Ft991aExtras + CwKeying + 'static` bound requires `CwKeying`
-/// unconditionally, and `radio`'s `CwKeying` impl for `Ft991a<S>` is itself
-/// conditional on `S: ModemControlLines` (`radio/src/ft991a.rs`). Without
-/// this impl, `Ft991a<TcpClientSession>` wouldn't satisfy `ui::run`'s bound
-/// at all. Returning an error here (rather than a silent no-op success) is
-/// the same honest-failure convention `radio::CwKeying`'s own trait-level
-/// defaults already use (`Err(RadioError::NotImplemented)`) and that
-/// `server/src/rigctl.rs`'s `RPRT_ERR` uses — a user who tries to key CW
-/// over a `--server` TCP connection gets a clear error at the point of use,
-/// not a keying attempt that silently does nothing.
-#[cfg(target_os = "linux")]
+/// Deliberately does **not** also implement
+/// [`cat_transport_core::ModemControlLines`] itself anymore — per
+/// `radio-cat-rs` ADR 0006 §7, that (unrelated) concern is now handled by
+/// wrapping this adapter in [`cat_transport_core::NoModemControlLines`]
+/// instead (see [`run_over_tcp`]), which composes the same honest-error
+/// behavior this struct used to hand-write five near-identical `Err(...)`
+/// bodies for. `From`/`Into`'s orphan rules mean `NoModemControlLines`
+/// itself can't also do this struct's `TcpSessionError` → `TransportError`
+/// mapping (it would need to see both concrete error types), so the two
+/// concerns stay factored into two small, separately-composable layers
+/// rather than one — see `NoModemControlLines`'s own doc comment for why.
 struct TcpClientSession {
     session: cat_transport_tcp::TcpCatSession,
 }
 
-#[cfg(target_os = "linux")]
 impl TcpClientSession {
     fn new(session: cat_transport_tcp::TcpCatSession) -> Self {
         Self { session }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn tcp_modem_lines_unsupported() -> cat_transport_core::TransportError {
-    cat_transport_core::TransportError::Other(
-        "RTS/DTR control lines are not available over a TCP CAT connection".to_string(),
-    )
-}
-
-#[cfg(target_os = "linux")]
 #[async_trait::async_trait(?Send)]
 impl cat_transport_core::CatSession for TcpClientSession {
     type Error = cat_transport_core::TransportError;
@@ -561,25 +556,6 @@ impl cat_transport_core::CatSession for TcpClientSession {
                     ))
                 }
             })
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl cat_transport_core::ModemControlLines for TcpClientSession {
-    fn set_rts(&self, _asserted: bool) -> Result<(), cat_transport_core::TransportError> {
-        Err(tcp_modem_lines_unsupported())
-    }
-    fn set_dtr(&self, _asserted: bool) -> Result<(), cat_transport_core::TransportError> {
-        Err(tcp_modem_lines_unsupported())
-    }
-    fn read_cts(&self) -> Result<bool, cat_transport_core::TransportError> {
-        Err(tcp_modem_lines_unsupported())
-    }
-    fn read_dsr(&self) -> Result<bool, cat_transport_core::TransportError> {
-        Err(tcp_modem_lines_unsupported())
-    }
-    fn read_dcd(&self) -> Result<bool, cat_transport_core::TransportError> {
-        Err(tcp_modem_lines_unsupported())
     }
 }
 

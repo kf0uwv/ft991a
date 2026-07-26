@@ -7,6 +7,9 @@ Decisions are recorded as [ADRs](https://cognitect.com/blog/2011/11/15/documenti
 |-----|-------|--------|
 | [0001](0001-second-radio-on-shared-cat-framework.md) | Second radio on the shared CAT framework | Accepted |
 | [0002](0002-rts-dtr-ptt-cw-keying.md) | RTS/DTR PTT and CW keying: RS-232C-only, DTR deferred | Accepted |
+| [0003](0003-consume-radio-cat-rs-windows-network-transport.md) | Consuming radio-cat-rs's unpushed ADR 0006 work: temporary `[patch]`, Windows-enabling `--server`, and `NoModemControlLines` | Accepted |
+| [0004](0004-shared-diagnostics-screen.md) | Shared diagnostics screen (`cat-diagnostics`) | Accepted |
+| [0005](0005-debian-and-windows-packaging.md) | Debian/Windows packaging and CI/release automation | Accepted |
 
 ## Repository status
 

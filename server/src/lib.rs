@@ -29,8 +29,11 @@
 //! `cat-server`/`cat-rigctl`, shared with `ts570d`.
 //!
 //! Linux-only, mirroring `cat-rigctl`'s own scope (see this crate's
-//! `Cargo.toml` doc comment) — the `ft991a` binary only depends on this
-//! crate under `cfg(target_os = "linux")`.
+//! `Cargo.toml` doc comment for the exact reason this remains true even
+//! after `radio-cat-rs` ADR 0006 gave `cat-server` itself a Windows
+//! backend — the bottleneck is `cat-rigctl`, not `cat-server`) — the
+//! `ft991a` binary only depends on this crate under
+//! `cfg(target_os = "linux")`.
 
 mod rigctl_radio;
 
