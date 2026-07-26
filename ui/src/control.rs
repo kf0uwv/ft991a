@@ -159,20 +159,22 @@ pub(crate) const EX_NUMBER_ENTRY_KEY: char = 'N';
 /// `Q`/[`EX_NUMBER_ENTRY_KEY`] by `test_profile_list_key_is_unique`.
 pub(crate) const PROFILE_LIST_KEY: char = 'L';
 
-/// The `Menu`-level keybinding for the shared diagnostics screen
-/// (`docs/adr/0004-shared-diagnostics-screen.md`) — a cross-cutting action
-/// that exercises the whole [`radio::FT991A_COMMAND_TABLE`], not a
-/// [`CommandGroup`], so it lives alongside [`PROFILE_LIST_KEY`]/
-/// [`EX_NUMBER_ENTRY_KEY`] as its own top-level escape hatch rather than as
-/// a 13th group — same reasoning as `PROFILE_LIST_KEY`'s own doc comment.
-/// `'D'` (mnemonic: "Diagnostics," matching `ts570d`'s own `[D]` screen) —
-/// verified unique against every [`ALL_GROUPS`] key plus `Q`/
-/// [`EX_NUMBER_ENTRY_KEY`]/[`PROFILE_LIST_KEY`] by
-/// `test_diagnostics_key_is_unique` below. Unlike `PROFILE_LIST_KEY`,
-/// pressing this key does not by itself produce a `ControlState`
-/// transition — running diagnostics needs live radio access `handle_key`
+/// The `Menu`-level keybinding for the hand-coded, full-parity diagnostics
+/// screen (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`) — a
+/// cross-cutting action that exercises essentially the whole `Radio`/
+/// `Ft991aExtras` trait surface, not a [`CommandGroup`], so it lives
+/// alongside [`PROFILE_LIST_KEY`]/[`EX_NUMBER_ENTRY_KEY`] as its own
+/// top-level escape hatch rather than as a 13th group — same reasoning as
+/// `PROFILE_LIST_KEY`'s own doc comment. `'D'` (mnemonic: "Diagnostics,"
+/// matching `ts570d`'s own `[D]` screen) — verified unique against every
+/// [`ALL_GROUPS`] key plus `Q`/[`EX_NUMBER_ENTRY_KEY`]/[`PROFILE_LIST_KEY`]
+/// by `test_diagnostics_key_is_unique` below. Pressing this key transitions
+/// to [`ControlState::DiagWarning`] — a transmit-safety acknowledgment gate,
+/// since this engine genuinely keys the transmitter — not straight into a
+/// run: running diagnostics needs live radio access `handle_key`
 /// deliberately never has (see [`KeyResult::RunDiagnostics`]'s doc
-/// comment), so `terminal.rs`'s event loop performs the actual run and
+/// comment), so `terminal.rs`'s event loop performs the actual run (once
+/// the warning is acknowledged and the callsign prompt confirmed) and
 /// transitions to [`ControlState::Diagnostics`] itself once it completes.
 pub(crate) const DIAGNOSTICS_KEY: char = 'D';
 
@@ -256,6 +258,16 @@ pub enum InputAction {
     /// `ExNumberEntry` (§11.4's own pseudocode gives value-entry's `Esc`
     /// two different targets, one per path — see [`ExValueEntryOrigin`]).
     SetExMenuItemFromTheme(u16, ExTheme, usize),
+    /// The pre-diagnostic-run CW-test callsign prompt
+    /// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`), reached from
+    /// [`ControlState::DiagWarning`]. Deliberately does **not** produce an
+    /// `ExecuteAction` via `validate_text_input` like every other
+    /// `TextInput` action — confirming it starts a diagnostic run, not a
+    /// single radio command — so `handle_key`'s `TextInput` `Enter` arm
+    /// special-cases it directly (mirrors `ts570d`'s own
+    /// `InputAction::DiagCallsign`, landed there for the identical reason).
+    /// A blank buffer means "skip the CW keying step," not an error.
+    DiagCwCallsign,
 }
 
 /// What radio action to perform when a list selection is confirmed.
@@ -760,18 +772,27 @@ pub enum ControlState {
         cursor: usize,
         error: Option<String>,
     },
-    /// Showing a completed diagnostics run's per-command results
-    /// (`docs/adr/0004-shared-diagnostics-screen.md`), reachable from
-    /// `Menu` via [`DIAGNOSTICS_KEY`]. Unlike every other `ControlState`
-    /// transition, `handle_key` never constructs this variant itself —
-    /// only `terminal.rs`'s event loop does, once
-    /// [`radio::Ft991aExtras::run_diagnostics_with`] has actually
-    /// completed (see [`KeyResult::RunDiagnostics`]'s doc comment).
-    /// `cursor` scrolls through `summary.outcomes` like `ExSubGroupMenu`/
-    /// `ProfileList`'s own cursors (up to 91+ rows, well past a single
-    /// screen). `Esc` -> `Menu`.
+    /// Pre-diagnostic-run transmit-safety gate
+    /// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`), reachable
+    /// from `Menu` via [`DIAGNOSTICS_KEY`]. The hand-coded, full-parity
+    /// diagnostics engine genuinely keys the transmitter (PTT, and CW if a
+    /// callsign is supplied on the next screen), so this requires an
+    /// explicit acknowledgment before anything is sent to the radio —
+    /// mirrors `ts570d`'s own `ControlState::DiagWarning`. `Enter`/`y`/`Y`
+    /// -> [`ControlState::TextInput`] with [`InputAction::DiagCwCallsign`];
+    /// `Esc` -> `Menu` with no `KeyResult` other than `Continue` (nothing
+    /// sent to the radio on cancel).
+    DiagWarning,
+    /// Showing a completed diagnostics run's per-step results
+    /// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`), reachable
+    /// from `DiagWarning` via the `DiagCwCallsign` prompt. Unlike every
+    /// other `ControlState` transition, `handle_key` never constructs this
+    /// variant itself — only `terminal.rs`'s event loop does, once the run
+    /// has actually completed (see [`KeyResult::RunDiagnostics`]'s doc
+    /// comment). `cursor` scrolls through `summary.outcomes` like
+    /// `ExSubGroupMenu`/`ProfileList`'s own cursors. `Esc` -> `Menu`.
     Diagnostics {
-        summary: radio::DiagnosticSummary,
+        summary: crate::diagnostics::DiagSummary,
         cursor: usize,
     },
     /// User is typing text input.
@@ -804,9 +825,14 @@ pub enum KeyResult {
     Quit,
     /// Execute a radio action with a validated value.
     Execute(ExecuteAction),
-    /// Run the shared diagnostics engine
-    /// (`docs/adr/0004-shared-diagnostics-screen.md`) and, once it
-    /// completes, transition to [`ControlState::Diagnostics`].
+    /// Run the hand-coded, full-parity diagnostics engine
+    /// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`) and, once it
+    /// completes, transition to [`ControlState::Diagnostics`]. Carries the
+    /// operator-supplied callsign for the CW-keying test step (`None` if
+    /// the operator left the prompt blank — that one step is then
+    /// `Skipped`, not attempted bare) — produced only by the
+    /// `DiagCwCallsign` `TextInput` confirmation, never by `DiagWarning`
+    /// itself.
     ///
     /// Deliberately **not** folded into [`Self::Execute`] /
     /// [`ExecuteAction`]: every `ExecuteAction` maps to one bounded
@@ -821,7 +847,7 @@ pub enum KeyResult {
     /// other action uses. `handle_key` itself stays synchronous and
     /// radio-free (per its own signature); only `terminal.rs` (which
     /// already holds both `radio` and `terminal`) can act on this.
-    RunDiagnostics,
+    RunDiagnostics(Option<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -3314,6 +3340,12 @@ fn validate_text_input(action: InputAction, buffer: &str) -> Result<ExecuteActio
             }
             Ok(ExecuteAction::SetExMenuItem(p1, v))
         }
+        // Handled directly in `handle_key`'s `TextInput` `Enter` arm, before
+        // this function is ever called — see `InputAction::DiagCwCallsign`'s
+        // own doc comment. Defensive, not a real path.
+        InputAction::DiagCwCallsign => {
+            Err("internal error: DiagCwCallsign should never reach validate_text_input".to_string())
+        }
     }
 }
 
@@ -3581,10 +3613,12 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
                 KeyResult::Continue
             }
             KeyCode::Char(c) if c.to_ascii_uppercase() == DIAGNOSTICS_KEY => {
-                // No state transition here — see `KeyResult::RunDiagnostics`'s
-                // doc comment for why `terminal.rs` performs the actual run
-                // and transition, not `handle_key`.
-                KeyResult::RunDiagnostics
+                // Transitions to the transmit-safety warning gate, not
+                // straight into a run — see `ControlState::DiagWarning`'s
+                // doc comment (`docs/adr/0006-hand-coded-full-parity-
+                // diagnostics.md`).
+                *state = ControlState::DiagWarning;
+                KeyResult::Continue
             }
             KeyCode::Char(c) if c.to_ascii_uppercase() == PROFILE_LIST_KEY => {
                 let dir = radio::default_profile_dir();
@@ -3748,6 +3782,23 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
             _ => KeyResult::Continue,
         },
 
+        ControlState::DiagWarning => match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                *state = ControlState::TextInput {
+                    prompt: "Callsign for CW test (blank to skip):".to_string(),
+                    buffer: String::new(),
+                    error: None,
+                    action: InputAction::DiagCwCallsign,
+                };
+                KeyResult::Continue
+            }
+            KeyCode::Esc => {
+                *state = ControlState::Menu;
+                KeyResult::Continue
+            }
+            _ => KeyResult::Continue,
+        },
+
         ControlState::Diagnostics { summary, cursor } => match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if *cursor > 0 {
@@ -3821,6 +3872,24 @@ pub fn handle_key(key: KeyEvent, state: &mut ControlState, display: &Ft991aDispl
             KeyCode::Enter => {
                 let action = *action;
                 let buf = buffer.clone();
+
+                // `DiagCwCallsign` doesn't produce an `ExecuteAction` (it
+                // starts a diagnostic run, not a single radio command) — see
+                // its own doc comment and
+                // `docs/adr/0006-hand-coded-full-parity-diagnostics.md`.
+                // Mirrors `ts570d::ui::control::InputAction::DiagCallsign`'s
+                // identical special-case.
+                if matches!(action, InputAction::DiagCwCallsign) {
+                    let trimmed = buf.trim().to_string();
+                    let callsign = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    };
+                    *state = ControlState::Menu;
+                    return KeyResult::RunDiagnostics(callsign);
+                }
+
                 match validate_text_input(action, &buf) {
                     Ok(exec) => {
                         *state = ControlState::Feedback {
@@ -8947,7 +9016,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Diagnostics (`docs/adr/0004-shared-diagnostics-screen.md`)
+    // Diagnostics (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`) —
+    // warning gate -> callsign prompt -> RunDiagnostics(callsign)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -8968,57 +9038,117 @@ mod tests {
     }
 
     #[test]
-    fn test_menu_diagnostics_key_produces_run_diagnostics_without_state_change() {
-        // Unlike every other `Menu`-level escape hatch, this key does NOT
-        // transition `state` itself — see `KeyResult::RunDiagnostics`'s doc
-        // comment for why (`handle_key` has no radio access to actually run
-        // the engine; `terminal.rs` does that and transitions afterward).
+    fn test_menu_diagnostics_key_transitions_to_warning_gate() {
+        // Unlike every other `Menu`-level escape hatch that runs radio
+        // commands, this only ever transitions to the warning gate —
+        // `handle_key` never starts the run itself (no radio access) and
+        // never produces `KeyResult::RunDiagnostics` directly from `Menu`.
         let mut state = ControlState::Menu;
         let result = handle_key(key(KeyCode::Char(DIAGNOSTICS_KEY)), &mut state, &display());
-        assert_eq!(result, KeyResult::RunDiagnostics);
-        assert!(matches!(state, ControlState::Menu));
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::DiagWarning));
     }
 
     #[test]
     fn test_menu_diagnostics_key_is_case_insensitive() {
         let mut state = ControlState::Menu;
-        let result = handle_key(
+        handle_key(
             key(KeyCode::Char(DIAGNOSTICS_KEY.to_ascii_lowercase())),
             &mut state,
             &display(),
         );
-        assert_eq!(result, KeyResult::RunDiagnostics);
+        assert!(matches!(state, ControlState::DiagWarning));
     }
 
-    fn sample_diagnostic_summary() -> radio::DiagnosticSummary {
-        radio::DiagnosticSummary {
+    #[test]
+    fn test_diag_warning_esc_cancels_to_menu_with_nothing_sent() {
+        let mut state = ControlState::DiagWarning;
+        let result = handle_key(key(KeyCode::Esc), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn test_diag_warning_enter_or_y_proceeds_to_callsign_prompt() {
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('Y')] {
+            let mut state = ControlState::DiagWarning;
+            let result = handle_key(key(code), &mut state, &display());
+            assert_eq!(result, KeyResult::Continue);
+            assert!(matches!(
+                state,
+                ControlState::TextInput {
+                    action: InputAction::DiagCwCallsign,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_diag_callsign_prompt_blank_produces_run_diagnostics_none() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: String::new(),
+            error: None,
+            action: InputAction::DiagCwCallsign,
+        };
+        let result = handle_key(key(KeyCode::Enter), &mut state, &display());
+        assert_eq!(result, KeyResult::RunDiagnostics(None));
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    #[test]
+    fn test_diag_callsign_prompt_trims_and_carries_callsign() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "  W1AW  ".to_string(),
+            error: None,
+            action: InputAction::DiagCwCallsign,
+        };
+        let result = handle_key(key(KeyCode::Enter), &mut state, &display());
+        assert_eq!(result, KeyResult::RunDiagnostics(Some("W1AW".to_string())));
+    }
+
+    #[test]
+    fn test_diag_callsign_prompt_esc_cancels_to_menu() {
+        let mut state = ControlState::TextInput {
+            prompt: "Callsign for CW test (blank to skip):".to_string(),
+            buffer: "W1AW".to_string(),
+            error: None,
+            action: InputAction::DiagCwCallsign,
+        };
+        let result = handle_key(key(KeyCode::Esc), &mut state, &display());
+        assert_eq!(result, KeyResult::Continue);
+        assert!(matches!(state, ControlState::Menu));
+    }
+
+    fn sample_diagnostic_summary() -> crate::diagnostics::DiagSummary {
+        use crate::diagnostics::{DiagOutcome, DiagResult, DiagSummary};
+        DiagSummary {
             outcomes: vec![
-                radio::DiagnosticOutcome {
+                DiagOutcome {
                     code: "FA",
-                    name: "VFO A frequency",
-                    request: "FA;".to_string(),
-                    result: radio::DiagnosticResult::Success {
-                        response: "FA00014250000;".to_string(),
+                    name: "get_vfo_a",
+                    result: DiagResult::Success {
+                        detail: "ok".to_string(),
                     },
-                    latency: std::time::Duration::from_millis(5),
+                    duration: std::time::Duration::from_millis(5),
                 },
-                radio::DiagnosticOutcome {
-                    code: "TX",
-                    name: "Transmit",
-                    request: String::new(),
-                    result: radio::DiagnosticResult::Skipped {
-                        reason: "write-only",
+                DiagOutcome {
+                    code: "KY",
+                    name: "play_keyer_memory (CW test)",
+                    result: DiagResult::Skipped {
+                        reason: "no callsign supplied".to_string(),
                     },
-                    latency: std::time::Duration::ZERO,
+                    duration: std::time::Duration::ZERO,
                 },
-                radio::DiagnosticOutcome {
+                DiagOutcome {
                     code: "XX",
                     name: "Bogus",
-                    request: "XX;".to_string(),
-                    result: radio::DiagnosticResult::Failure {
+                    result: DiagResult::Failure {
                         message: "boom".to_string(),
                     },
-                    latency: std::time::Duration::from_millis(10),
+                    duration: std::time::Duration::from_millis(10),
                 },
             ],
         }

@@ -45,13 +45,16 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use radio::{
-    CwKeying, Frequency, Ft991aExtras, MemoryChannelEntry, MemoryTag, Radio, RadioError,
-    RadioResult, TaggedMemoryChannel,
+    ctcss_tone_hz, dcs_code_number, AgcMode, Band, CwKeying, EncoderSelector, Frequency,
+    Ft991aExtras, KeyerPlaybackMode, MemoryChannelEntry, MemoryTag, Meter, Mode, PreampMode, Radio,
+    RadioError, RadioIndicator, RadioResult, RepeaterShift, ScanState, TaggedMemoryChannel,
+    ToneSquelchMode,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
     control::{handle_key, ControlState, ExecuteAction, KeyResult},
+    diagnostics::{DiagOutcome, DiagResult, DiagSummary},
     layout::{
         draw_control_panel, draw_diagnostics_live, draw_disconnected, draw_errors, draw_header,
         draw_status, split_areas,
@@ -779,17 +782,1874 @@ async fn execute_action<R: Radio + Ft991aExtras + CwKeying>(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hand-coded, full-parity diagnostics engine
+// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`)
+//
+// Replaces the old `cat_diagnostics`-wrapped, read-only-liveness-only
+// engine entirely. Mirrors `ts570d::ui::terminal`'s own
+// `RadioSnapshot`/`snapshot_state`/`restore_state`/`run_diagnostics_task`
+// pattern (same standard of care: every step calls a real typed
+// `Radio`/`Ft991aExtras` method, verifies it, and the whole run is followed
+// by an unconditional best-effort restore) — adapted to this crate's own
+// single-sequential-loop architecture (no separate radio/UI tasks) and to
+// FT-991A's own protocol quirks (see the ADR for the full per-command
+// safety reasoning, especially the tricky ones: clarifier absolute-set
+// semantics, QMB's dedicated slot, `VM`'s select-collapsing toggle, `KY`'s
+// keyer-memory-playback nature).
+// ---------------------------------------------------------------------------
+
+/// Total number of diagnostic steps this engine runs (one row per method
+/// call or set+verify pair — see the ADR for the full per-command mapping).
+/// Verified against `run_diagnostics_task`'s actual output by
+/// `test_diag_step_count_matches_actual_output` below.
+pub(crate) const DIAG_STEP_COUNT: usize = 114;
+
+/// A snapshot of every readable+settable piece of state this engine's
+/// "plain parameter" steps touch, taken via typed `Radio`/`Ft991aExtras`
+/// getters before anything runs. Every field is `Option<T>` so that an
+/// individual getter failure is non-fatal (simply not restored later) —
+/// mirrors `ts570d::ui::terminal::RadioSnapshot` exactly.
+///
+/// Steps whose effects are undone **inline**, within their own step (e.g.
+/// `transmit`/`receive`, `swap_vfos`, memory-channel up/down, QMB
+/// store/recall, `VM`, the `KY`/`KM` keyer-memory tests) deliberately do
+/// **not** have a field here — this snapshot only covers state that is
+/// simply set once and left for the final unconditional restore pass.
+struct RadioSnapshot {
+    vfo_a: Option<Frequency>,
+    vfo_b: Option<Frequency>,
+    mode: Option<Mode>,
+    power_on: Option<bool>,
+    memory_channel: Option<u8>,
+    selected_meter: Option<Meter>,
+    af_gain: Option<u8>,
+    rf_gain: Option<u8>,
+    squelch: Option<u8>,
+    power: Option<u8>,
+    rx_clarifier_on: Option<bool>,
+    tx_clarifier_on: Option<bool>,
+    /// Via `get_information()`'s `clarifier_offset_hz` (P3) — `RD`/`RU` are
+    /// **absolute sets**, not relative steps (confirmed against
+    /// `ft991a_radio.rs`'s own emulator implementation and
+    /// `radio_trait.rs`'s doc comments — see the ADR), so this one field is
+    /// enough to restore the exact original offset via one computed
+    /// `clarifier_clear`/`clarifier_down`/`clarifier_up` call.
+    clarifier_offset_hz: Option<i16>,
+    ctcss_tone_hz: Option<f32>,
+    dcs_code: Option<u16>,
+    tone_squelch_mode: Option<ToneSquelchMode>,
+    if_shift_hz: Option<i16>,
+    keyer_pitch_hz: Option<u16>,
+    keyer_enabled: Option<bool>,
+    keyer_speed: Option<u8>,
+    cw_spot_on: Option<bool>,
+    break_in_on: Option<bool>,
+    semi_break_in_delay: Option<u16>,
+    scan_state: Option<ScanState>,
+    vox_on: Option<bool>,
+    vox_delay: Option<u16>,
+    vox_gain: Option<u8>,
+    attenuator_on: Option<bool>,
+    preamp_mode: Option<PreampMode>,
+    noise_blanker_on: Option<bool>,
+    noise_blanker_level: Option<u8>,
+    noise_reduction_on: Option<bool>,
+    noise_reduction_level: Option<u8>,
+    agc_mode: Option<AgcMode>,
+    contour_on: Option<bool>,
+    contour_frequency_hz: Option<u16>,
+    apf_on: Option<bool>,
+    apf_frequency_hz: Option<i16>,
+    manual_notch_on: Option<bool>,
+    manual_notch_frequency_hz: Option<u16>,
+    auto_notch_on: Option<bool>,
+    narrow_on: Option<bool>,
+    filter_width_index: Option<u8>,
+    mic_gain: Option<u8>,
+    speech_processor_level: Option<u8>,
+    speech_processor_on: Option<bool>,
+    parametric_mic_eq_on: Option<bool>,
+    monitor_on: Option<bool>,
+    monitor_level: Option<u8>,
+    fine_step: Option<bool>,
+    auto_info_on: Option<bool>,
+    dimmer: Option<(u8, u8)>,
+    frequency_lock: Option<bool>,
+    tx_vfo: Option<u8>,
+    txw_on: Option<bool>,
+    repeater_shift: Option<RepeaterShift>,
+}
+
+/// Snapshot all readable radio state this engine's plain-parameter steps
+/// touch. Failures on individual fields are silently stored as `None` — the
+/// snapshot itself always succeeds, mirroring `ts570d`'s own
+/// `snapshot_state`.
+async fn snapshot_state<R: Radio + Ft991aExtras>(radio: &mut R) -> RadioSnapshot {
+    RadioSnapshot {
+        vfo_a: radio.get_vfo_a().await.ok(),
+        vfo_b: radio.get_vfo_b().await.ok(),
+        mode: radio.get_mode().await.ok(),
+        power_on: radio.get_power_on().await.ok(),
+        memory_channel: radio.get_memory_channel().await.ok(),
+        selected_meter: radio.get_selected_meter().await.ok(),
+        af_gain: radio.get_af_gain().await.ok(),
+        rf_gain: radio.get_rf_gain().await.ok(),
+        squelch: radio.get_squelch().await.ok(),
+        power: radio.get_power().await.ok(),
+        rx_clarifier_on: radio.get_rx_clarifier_on().await.ok(),
+        tx_clarifier_on: radio.get_tx_clarifier_on().await.ok(),
+        clarifier_offset_hz: radio
+            .get_information()
+            .await
+            .ok()
+            .map(|info| info.clarifier_offset_hz),
+        ctcss_tone_hz: radio.get_ctcss_tone_hz().await.ok(),
+        dcs_code: radio.get_dcs_code().await.ok(),
+        tone_squelch_mode: radio.get_tone_squelch_mode().await.ok(),
+        if_shift_hz: radio.get_if_shift_hz().await.ok(),
+        keyer_pitch_hz: radio.get_keyer_pitch_hz().await.ok(),
+        keyer_enabled: radio.get_keyer_enabled().await.ok(),
+        keyer_speed: radio.get_keyer_speed().await.ok(),
+        cw_spot_on: radio.get_cw_spot_on().await.ok(),
+        break_in_on: radio.get_break_in_on().await.ok(),
+        semi_break_in_delay: radio.get_semi_break_in_delay().await.ok(),
+        scan_state: radio.get_scan_state().await.ok(),
+        vox_on: radio.get_vox_on().await.ok(),
+        vox_delay: radio.get_vox_delay().await.ok(),
+        vox_gain: radio.get_vox_gain().await.ok(),
+        attenuator_on: radio.get_attenuator_on().await.ok(),
+        preamp_mode: radio.get_preamp_mode().await.ok(),
+        noise_blanker_on: radio.get_noise_blanker_on().await.ok(),
+        noise_blanker_level: radio.get_noise_blanker_level().await.ok(),
+        noise_reduction_on: radio.get_noise_reduction_on().await.ok(),
+        noise_reduction_level: radio.get_noise_reduction_level().await.ok(),
+        agc_mode: radio.get_agc_mode().await.ok(),
+        contour_on: radio.get_contour_on().await.ok(),
+        contour_frequency_hz: radio.get_contour_frequency_hz().await.ok(),
+        apf_on: radio.get_apf_on().await.ok(),
+        apf_frequency_hz: radio.get_apf_frequency_hz().await.ok(),
+        manual_notch_on: radio.get_manual_notch_on().await.ok(),
+        manual_notch_frequency_hz: radio.get_manual_notch_frequency_hz().await.ok(),
+        auto_notch_on: radio.get_auto_notch_on().await.ok(),
+        narrow_on: radio.get_narrow_on().await.ok(),
+        filter_width_index: radio.get_filter_width_index().await.ok(),
+        mic_gain: radio.get_mic_gain().await.ok(),
+        speech_processor_level: radio.get_speech_processor_level().await.ok(),
+        speech_processor_on: radio.get_speech_processor_on().await.ok(),
+        parametric_mic_eq_on: radio.get_parametric_mic_eq_on().await.ok(),
+        monitor_on: radio.get_monitor_on().await.ok(),
+        monitor_level: radio.get_monitor_level().await.ok(),
+        fine_step: radio.get_fine_step().await.ok(),
+        auto_info_on: radio.get_auto_info_on().await.ok(),
+        dimmer: radio.get_dimmer().await.ok(),
+        frequency_lock: radio.get_frequency_lock().await.ok(),
+        tx_vfo: radio.get_tx_vfo().await.ok(),
+        txw_on: radio.get_txw_on().await.ok(),
+        repeater_shift: radio.get_repeater_shift().await.ok(),
+    }
+}
+
+/// Restore radio state from a snapshot. Best-effort: individual setter
+/// failures are silently ignored (mirrors `ts570d`'s own `restore_state`).
+/// PTT is cleared first via `receive()`; `power_on` is restored last so
+/// every other setter has time to complete first.
+async fn restore_state<R: Radio + Ft991aExtras>(radio: &mut R, snap: RadioSnapshot) {
+    let _ = radio.receive().await;
+
+    if let Some(v) = snap.vfo_a {
+        let _ = radio.set_vfo_a(v).await;
+    }
+    if let Some(v) = snap.vfo_b {
+        let _ = radio.set_vfo_b(v).await;
+    }
+    if let Some(v) = snap.mode {
+        let _ = radio.set_mode(v).await;
+    }
+    if let Some(v) = snap.memory_channel {
+        let _ = radio.set_memory_channel(v).await;
+    }
+    if let Some(v) = snap.selected_meter {
+        let _ = radio.select_meter(v).await;
+    }
+    if let Some(v) = snap.af_gain {
+        let _ = radio.set_af_gain(v).await;
+    }
+    if let Some(v) = snap.rf_gain {
+        let _ = radio.set_rf_gain(v).await;
+    }
+    if let Some(v) = snap.squelch {
+        let _ = radio.set_squelch(v).await;
+    }
+    if let Some(v) = snap.power {
+        let _ = radio.set_power(v).await;
+    }
+    if let Some(v) = snap.rx_clarifier_on {
+        let _ = radio.set_rx_clarifier_on(v).await;
+    }
+    if let Some(v) = snap.tx_clarifier_on {
+        let _ = radio.set_tx_clarifier_on(v).await;
+    }
+    if let Some(offset) = snap.clarifier_offset_hz {
+        let _ = match offset {
+            0 => radio.clarifier_clear().await,
+            o if o < 0 => radio.clarifier_down((-o) as u16).await,
+            o => radio.clarifier_up(o as u16).await,
+        };
+    }
+    if let Some(v) = snap.ctcss_tone_hz {
+        let _ = radio.set_ctcss_tone_hz(v).await;
+    }
+    if let Some(v) = snap.dcs_code {
+        let _ = radio.set_dcs_code(v).await;
+    }
+    if let Some(v) = snap.tone_squelch_mode {
+        let _ = radio.set_tone_squelch_mode(v).await;
+    }
+    if let Some(v) = snap.if_shift_hz {
+        let _ = radio.set_if_shift_hz(v).await;
+    }
+    if let Some(v) = snap.keyer_pitch_hz {
+        let _ = radio.set_keyer_pitch_hz(v).await;
+    }
+    if let Some(v) = snap.keyer_enabled {
+        let _ = radio.set_keyer_enabled(v).await;
+    }
+    if let Some(v) = snap.keyer_speed {
+        let _ = radio.set_keyer_speed(v).await;
+    }
+    if let Some(v) = snap.cw_spot_on {
+        let _ = radio.set_cw_spot_on(v).await;
+    }
+    if let Some(v) = snap.break_in_on {
+        let _ = radio.set_break_in_on(v).await;
+    }
+    if let Some(v) = snap.semi_break_in_delay {
+        let _ = radio.set_semi_break_in_delay(v).await;
+    }
+    if let Some(v) = snap.scan_state {
+        let _ = radio.set_scan_state(v).await;
+    }
+    if let Some(v) = snap.vox_on {
+        let _ = radio.set_vox_on(v).await;
+    }
+    if let Some(v) = snap.vox_delay {
+        let _ = radio.set_vox_delay(v).await;
+    }
+    if let Some(v) = snap.vox_gain {
+        let _ = radio.set_vox_gain(v).await;
+    }
+    if let Some(v) = snap.attenuator_on {
+        let _ = radio.set_attenuator_on(v).await;
+    }
+    if let Some(v) = snap.preamp_mode {
+        let _ = radio.set_preamp_mode(v).await;
+    }
+    if let Some(v) = snap.noise_blanker_on {
+        let _ = radio.set_noise_blanker_on(v).await;
+    }
+    if let Some(v) = snap.noise_blanker_level {
+        let _ = radio.set_noise_blanker_level(v).await;
+    }
+    if let Some(v) = snap.noise_reduction_on {
+        let _ = radio.set_noise_reduction_on(v).await;
+    }
+    if let Some(v) = snap.noise_reduction_level {
+        let _ = radio.set_noise_reduction_level(v).await;
+    }
+    if let Some(v) = snap.agc_mode {
+        let _ = radio.set_agc_mode(v).await;
+    }
+    if let Some(v) = snap.contour_on {
+        let _ = radio.set_contour_on(v).await;
+    }
+    if let Some(v) = snap.contour_frequency_hz {
+        let _ = radio.set_contour_frequency_hz(v).await;
+    }
+    if let Some(v) = snap.apf_on {
+        let _ = radio.set_apf_on(v).await;
+    }
+    if let Some(v) = snap.apf_frequency_hz {
+        let _ = radio.set_apf_frequency_hz(v).await;
+    }
+    if let Some(v) = snap.manual_notch_on {
+        let _ = radio.set_manual_notch_on(v).await;
+    }
+    if let Some(v) = snap.manual_notch_frequency_hz {
+        let _ = radio.set_manual_notch_frequency_hz(v).await;
+    }
+    if let Some(v) = snap.auto_notch_on {
+        let _ = radio.set_auto_notch_on(v).await;
+    }
+    if let Some(v) = snap.narrow_on {
+        let _ = radio.set_narrow_on(v).await;
+    }
+    if let Some(v) = snap.filter_width_index {
+        let _ = radio.set_filter_width_index(v).await;
+    }
+    if let Some(v) = snap.mic_gain {
+        let _ = radio.set_mic_gain(v).await;
+    }
+    if let Some(v) = snap.speech_processor_level {
+        let _ = radio.set_speech_processor_level(v).await;
+    }
+    if let Some(v) = snap.speech_processor_on {
+        let _ = radio.set_speech_processor_on(v).await;
+    }
+    if let Some(v) = snap.parametric_mic_eq_on {
+        let _ = radio.set_parametric_mic_eq_on(v).await;
+    }
+    if let Some(v) = snap.monitor_on {
+        let _ = radio.set_monitor_on(v).await;
+    }
+    if let Some(v) = snap.monitor_level {
+        let _ = radio.set_monitor_level(v).await;
+    }
+    if let Some(v) = snap.fine_step {
+        let _ = radio.set_fine_step(v).await;
+    }
+    if let Some(v) = snap.auto_info_on {
+        let _ = radio.set_auto_info_on(v).await;
+    }
+    if let Some((led, tft)) = snap.dimmer {
+        let _ = radio.set_dimmer(led, tft).await;
+    }
+    if let Some(v) = snap.frequency_lock {
+        let _ = radio.set_frequency_lock(v).await;
+    }
+    if let Some(v) = snap.tx_vfo {
+        let _ = radio.set_tx_vfo(v).await;
+    }
+    if let Some(v) = snap.txw_on {
+        let _ = radio.set_txw_on(v).await;
+    }
+    if let Some(v) = snap.repeater_shift {
+        let _ = radio.set_repeater_shift(v).await;
+    }
+
+    // Restored last, mirrors `ts570d` exactly.
+    if let Some(v) = snap.power_on {
+        let _ = radio.set_power_on(v).await;
+    }
+}
+
+/// Push one step's outcome, notifying the live-progress callback.
+fn record_diag_outcome(
+    outcomes: &mut Vec<DiagOutcome>,
+    on_progress: &mut dyn FnMut(&DiagOutcome),
+    code: &'static str,
+    name: &'static str,
+    result: DiagResult,
+    start: Instant,
+) {
+    let outcome = DiagOutcome {
+        code,
+        name,
+        result,
+        duration: start.elapsed(),
+    };
+    on_progress(&outcome);
+    outcomes.push(outcome);
+}
+
+/// Run the hand-coded, full-parity diagnostics engine
+/// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`). Every step calls
+/// a real typed `Radio`/`Ft991aExtras` method (never a raw CAT string) and
+/// verifies it; the whole run is followed by an unconditional, best-effort
+/// [`restore_state`] — mirrors `ts570d::ui::terminal::run_diagnostics_task`'s
+/// own standard of care.
+///
+/// `cw_callsign` is collected **before** this function is ever called (the
+/// `DiagWarning` -> `TextInput{action: DiagCwCallsign}` gate in
+/// `control.rs`, front-loaded exactly like `ts570d`'s own gate) — `None`
+/// means the operator left the prompt blank, so the `KY` (CW keying) step
+/// is recorded `Skipped`, not attempted bare (an unidentified test
+/// transmission would be a real regulatory problem, not just cosmetic).
+///
+/// Single pass only (no repeated rounds, unlike `ts570d`'s 3× — a
+/// deliberate reduction in RF-safety exposure specific to this engine: a
+/// run already keys PTT and, if a callsign was supplied, sends real CW
+/// once; repeating that 3× per run buys robustness this repo's diagnostics
+/// screen deliberately doesn't spend the extra transmit time on by
+/// default).
+async fn run_diagnostics_task<R: Radio + Ft991aExtras>(
+    radio: &mut R,
+    cw_callsign: Option<String>,
+    mut on_progress: impl FnMut(&DiagOutcome),
+) -> DiagSummary {
+    let mut outcomes: Vec<DiagOutcome> = Vec::with_capacity(DIAG_STEP_COUNT);
+
+    // Snapshot every readable+settable piece of state this run's plain
+    // parameter steps touch, before anything runs.
+    let snapshot = snapshot_state(radio).await;
+
+    macro_rules! diag_get {
+        ($code:expr, $name:expr, $expr:expr) => {{
+            let start = Instant::now();
+            let result = match $expr.await {
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+                Err(e) => DiagResult::Failure {
+                    message: e.to_string(),
+                },
+            };
+            record_diag_outcome(&mut outcomes, &mut on_progress, $code, $name, result, start);
+        }};
+    }
+
+    macro_rules! diag_action {
+        ($code:expr, $name:expr, $expr:expr) => {{
+            let start = Instant::now();
+            let result = match $expr.await {
+                Ok(()) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+                Err(e) => DiagResult::Failure {
+                    message: e.to_string(),
+                },
+            };
+            record_diag_outcome(&mut outcomes, &mut on_progress, $code, $name, result, start);
+        }};
+    }
+
+    macro_rules! diag_set_get {
+        ($code:expr, $name:expr, $set:expr, $get:expr, $target:expr) => {{
+            let start = Instant::now();
+            let result = match $set.await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("set failed: {e}"),
+                },
+                Ok(()) => match $get.await {
+                    Err(e) => DiagResult::Failure {
+                        message: format!("verify get failed: {e}"),
+                    },
+                    Ok(v) if v != $target => DiagResult::Failure {
+                        message: format!("verify mismatch: got {:?} expected {:?}", v, $target),
+                    },
+                    Ok(_) => DiagResult::Success {
+                        detail: "ok".to_string(),
+                    },
+                },
+            };
+            record_diag_outcome(&mut outcomes, &mut on_progress, $code, $name, result, start);
+        }};
+    }
+
+    // -----------------------------------------------------------------
+    // Batch: FA/FB/MD/TX
+    // -----------------------------------------------------------------
+    {
+        let target = Frequency::new(14_195_000).expect("valid ham frequency");
+        diag_set_get!(
+            "FA",
+            "set_vfo_a",
+            radio.set_vfo_a(target),
+            radio.get_vfo_a(),
+            target
+        );
+    }
+    diag_get!("FA", "get_vfo_a", radio.get_vfo_a());
+    {
+        let target = Frequency::new(7_100_000).expect("valid ham frequency");
+        diag_set_get!(
+            "FB",
+            "set_vfo_b",
+            radio.set_vfo_b(target),
+            radio.get_vfo_b(),
+            target
+        );
+    }
+    diag_get!("FB", "get_vfo_b", radio.get_vfo_b());
+    diag_set_get!(
+        "MD",
+        "set_mode(USB)",
+        radio.set_mode(Mode::Usb),
+        radio.get_mode(),
+        Mode::Usb
+    );
+    diag_set_get!(
+        "MD",
+        "set_mode(LSB)",
+        radio.set_mode(Mode::Lsb),
+        radio.get_mode(),
+        Mode::Lsb
+    );
+    diag_set_get!(
+        "MD",
+        "set_mode(CW)",
+        radio.set_mode(Mode::CwU),
+        radio.get_mode(),
+        Mode::CwU
+    );
+    diag_get!("MD", "get_mode", radio.get_mode());
+
+    // TX: transmit() immediately followed by receive() inline — self-undoing,
+    // mirrors `ts570d`'s own step 56 exactly. This is the one step (besides
+    // the callsign-gated `KY`) that genuinely keys PTT on real hardware.
+    {
+        let start = Instant::now();
+        let result = match radio.transmit().await {
+            Err(e) => DiagResult::Failure {
+                message: format!("transmit failed: {e}"),
+            },
+            Ok(()) => {
+                let _ = radio.receive().await;
+                DiagResult::Success {
+                    detail: "ok".to_string(),
+                }
+            }
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "TX",
+            "transmit (immediately followed by receive)",
+            result,
+            start,
+        );
+    }
+    diag_action!("TX", "receive", radio.receive());
+
+    // -----------------------------------------------------------------
+    // Batch: SM/RM/RI (pure reads, no restore needed) and MS
+    // -----------------------------------------------------------------
+    diag_get!("SM", "get_smeter", radio.get_smeter());
+    diag_get!("RM", "get_meter(PO)", radio.get_meter(Meter::Po));
+    diag_get!(
+        "RI",
+        "get_radio_indicator(TxLed)",
+        radio.get_radio_indicator(RadioIndicator::TxLed)
+    );
+    diag_set_get!(
+        "MS",
+        "select_meter(PO)",
+        radio.select_meter(Meter::Po),
+        radio.get_selected_meter(),
+        Meter::Po
+    );
+
+    // -----------------------------------------------------------------
+    // Batch: PS/AG/RG/SQ/PC/ID
+    // -----------------------------------------------------------------
+    diag_set_get!(
+        "PS",
+        "set_power_on(true)",
+        radio.set_power_on(true),
+        radio.get_power_on(),
+        true
+    );
+    diag_get!("PS", "get_power_on", radio.get_power_on());
+    diag_set_get!(
+        "AG",
+        "set_af_gain",
+        radio.set_af_gain(128),
+        radio.get_af_gain(),
+        128u8
+    );
+    diag_get!("AG", "get_af_gain", radio.get_af_gain());
+    diag_set_get!(
+        "RG",
+        "set_rf_gain",
+        radio.set_rf_gain(200),
+        radio.get_rf_gain(),
+        200u8
+    );
+    diag_get!("RG", "get_rf_gain", radio.get_rf_gain());
+    diag_set_get!(
+        "SQ",
+        "set_squelch",
+        radio.set_squelch(30),
+        radio.get_squelch(),
+        30u8
+    );
+    diag_get!("SQ", "get_squelch", radio.get_squelch());
+    diag_set_get!(
+        "PC",
+        "set_power",
+        radio.set_power(50),
+        radio.get_power(),
+        50u8
+    );
+    diag_get!("PC", "get_power", radio.get_power());
+    diag_get!("ID", "get_id", radio.get_id());
+
+    // -----------------------------------------------------------------
+    // Batch: IF/RS/UL, EX (get-only)
+    // -----------------------------------------------------------------
+    diag_get!("IF", "get_information", radio.get_information());
+    diag_get!("RS", "get_menu_mode_active", radio.get_menu_mode_active());
+    diag_get!("UL", "get_pll_unlocked", radio.get_pll_unlocked());
+    diag_get!("EX", "get_ex_menu_item(001)", radio.get_ex_menu_item(1));
+
+    // -----------------------------------------------------------------
+    // Batch: MC/MR/MW/MT
+    // -----------------------------------------------------------------
+    diag_set_get!(
+        "MC",
+        "set_memory_channel",
+        radio.set_memory_channel(5),
+        radio.get_memory_channel(),
+        5u8
+    );
+    diag_get!("MC", "get_memory_channel", radio.get_memory_channel());
+    diag_get!("MR", "read_memory_channel(1)", radio.read_memory_channel(1));
+    // MW: write_memory_channel — self-contained snapshot/write/verify/
+    // restore on channel 3 (a pure `read+write` round trip; `MemoryChannelEntry`
+    // has no "vacant" concept in this trait, unlike `ts570d`, so the
+    // original contents can always be written back verbatim).
+    {
+        let start = Instant::now();
+        let test_ch: u8 = 3;
+        let orig = radio.read_memory_channel(test_ch).await.ok();
+        let test_entry = MemoryChannelEntry {
+            channel: test_ch,
+            frequency_hz: 14_205_000,
+            clarifier_offset_hz: 0,
+            rx_clarifier_on: false,
+            tx_clarifier_on: false,
+            mode: Mode::Usb,
+            tone_status: 0,
+            offset_type: 0,
+        };
+        let result = match radio.write_memory_channel(test_entry).await {
+            Err(e) => DiagResult::Failure {
+                message: format!("write failed: {e}"),
+            },
+            Ok(()) => match radio.read_memory_channel(test_ch).await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(entry)
+                    if entry.frequency_hz != test_entry.frequency_hz
+                        || entry.mode != test_entry.mode =>
+                {
+                    DiagResult::Failure {
+                        message: format!("verify mismatch: got {entry:?}"),
+                    }
+                }
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            },
+        };
+        if let Some(entry) = orig {
+            let _ = radio.write_memory_channel(entry).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "MW",
+            "write_memory_channel",
+            result,
+            start,
+        );
+    }
+    diag_get!(
+        "MT",
+        "read_memory_channel_tag(1)",
+        radio.read_memory_channel_tag(1)
+    );
+
+    // -----------------------------------------------------------------
+    // Batch: AB/BA/AM/VM/MA/CH/QI/QR/QS/SV
+    // -----------------------------------------------------------------
+    diag_action!("AB", "copy_vfo_a_to_b", radio.copy_vfo_a_to_b());
+    diag_action!("BA", "copy_vfo_b_to_a", radio.copy_vfo_b_to_a());
+
+    // AM: store_vfo_to_memory operates on the *currently selected* memory
+    // channel (no channel argument) — self-contained: pick channel 2,
+    // snapshot it and the current selection, then set/store/verify/restore.
+    {
+        let start = Instant::now();
+        let test_ch: u8 = 2;
+        let orig_selected = radio.get_memory_channel().await.ok();
+        let orig_entry = radio.read_memory_channel(test_ch).await.ok();
+        let result: DiagResult = 'step: {
+            if let Err(e) = radio.set_memory_channel(test_ch).await {
+                break 'step DiagResult::Failure {
+                    message: format!("select channel failed: {e}"),
+                };
+            }
+            let target = match Frequency::new(14_215_000) {
+                Ok(f) => f,
+                Err(e) => {
+                    break 'step DiagResult::Failure {
+                        message: format!("freq invalid: {e}"),
+                    }
+                }
+            };
+            if let Err(e) = radio.set_vfo_a(target).await {
+                break 'step DiagResult::Failure {
+                    message: format!("set_vfo_a failed: {e}"),
+                };
+            }
+            if let Err(e) = radio.set_mode(Mode::Usb).await {
+                break 'step DiagResult::Failure {
+                    message: format!("set_mode failed: {e}"),
+                };
+            }
+            if let Err(e) = radio.store_vfo_to_memory().await {
+                break 'step DiagResult::Failure {
+                    message: format!("store_vfo_to_memory failed: {e}"),
+                };
+            }
+            match radio.read_memory_channel(test_ch).await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(entry) if entry.frequency_hz != target.hz() => DiagResult::Failure {
+                    message: format!(
+                        "verify mismatch: got {} expected {}",
+                        entry.frequency_hz,
+                        target.hz()
+                    ),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        if let Some(entry) = orig_entry {
+            let _ = radio.write_memory_channel(entry).await;
+        }
+        if let Some(ch) = orig_selected {
+            let _ = radio.set_memory_channel(ch).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "AM",
+            "store_vfo_to_memory",
+            result,
+            start,
+        );
+    }
+
+    // VM: toggle_vfo_memory_mode collapses any select mode other than
+    // VFO(0)/Memory(1) to VFO(0) on the first toggle (confirmed via
+    // `ft991a_radio.rs`'s emulator implementation), so a double-toggle only
+    // restores exactly when the starting `select` (via `get_information`)
+    // was 0 or 1 — otherwise this step is honestly `Skipped`, not guessed.
+    {
+        let start = Instant::now();
+        let before = radio.get_information().await;
+        let result = match before {
+            Err(e) => DiagResult::Failure {
+                message: format!("get_information failed: {e}"),
+            },
+            Ok(info) if info.select > 1 => DiagResult::Skipped {
+                reason: format!(
+                    "current VFO/memory select mode ({}) is not VFO(0)/Memory(1); \
+                     toggle_vfo_memory_mode collapses any other mode to VFO on the \
+                     first call and cannot be double-toggled back exactly",
+                    info.select
+                ),
+            },
+            Ok(info) => 'step: {
+                let sel = info.select;
+                if let Err(e) = radio.toggle_vfo_memory_mode().await {
+                    break 'step DiagResult::Failure {
+                        message: format!("toggle failed: {e}"),
+                    };
+                }
+                let expected_after = u8::from(sel == 0);
+                let after = match radio.get_information().await {
+                    Err(e) => {
+                        break 'step DiagResult::Failure {
+                            message: format!("verify get failed: {e}"),
+                        }
+                    }
+                    Ok(i) => i.select,
+                };
+                if after != expected_after {
+                    break 'step DiagResult::Failure {
+                        message: format!(
+                            "verify mismatch: got select={after} expected {expected_after}"
+                        ),
+                    };
+                }
+                // Restore: a second toggle is exact since `sel` was 0 or 1.
+                if let Err(e) = radio.toggle_vfo_memory_mode().await {
+                    break 'step DiagResult::Failure {
+                        message: format!("restore toggle failed: {e}"),
+                    };
+                }
+                DiagResult::Success {
+                    detail: "ok".to_string(),
+                }
+            }
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "VM",
+            "toggle_vfo_memory_mode",
+            result,
+            start,
+        );
+    }
+
+    diag_action!("MA", "recall_memory_to_vfo", radio.recall_memory_to_vfo());
+
+    // CH: memory_channel_up / memory_channel_down, each self-contained —
+    // verify the index actually changed, then restore via an *absolute*
+    // `set_memory_channel` rather than stepping the opposite direction
+    // (which might not land on the same index across a vacant-channel
+    // wraparound boundary — manual gives no boundary behavior at all, see
+    // the ADR / planning/yaesu/findings.md).
+    {
+        let start = Instant::now();
+        let before = radio.get_memory_channel().await.ok();
+        let result = match before {
+            None => DiagResult::Failure {
+                message: "get_memory_channel failed before test".to_string(),
+            },
+            Some(before) => 'step: {
+                if let Err(e) = radio.memory_channel_up().await {
+                    break 'step DiagResult::Failure {
+                        message: format!("memory_channel_up failed: {e}"),
+                    };
+                }
+                match radio.get_memory_channel().await {
+                    Err(e) => {
+                        break 'step DiagResult::Failure {
+                            message: format!("verify get failed: {e}"),
+                        }
+                    }
+                    Ok(after) if after == before => {
+                        break 'step DiagResult::Failure {
+                            message: "channel did not change".to_string(),
+                        }
+                    }
+                    Ok(_) => {}
+                }
+                DiagResult::Success {
+                    detail: "ok".to_string(),
+                }
+            }
+        };
+        if let Some(before) = before {
+            let _ = radio.set_memory_channel(before).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "CH",
+            "memory_channel_up",
+            result,
+            start,
+        );
+    }
+    {
+        let start = Instant::now();
+        let before = radio.get_memory_channel().await.ok();
+        let result = match before {
+            None => DiagResult::Failure {
+                message: "get_memory_channel failed before test".to_string(),
+            },
+            Some(before) => 'step: {
+                if let Err(e) = radio.memory_channel_down().await {
+                    break 'step DiagResult::Failure {
+                        message: format!("memory_channel_down failed: {e}"),
+                    };
+                }
+                match radio.get_memory_channel().await {
+                    Err(e) => {
+                        break 'step DiagResult::Failure {
+                            message: format!("verify get failed: {e}"),
+                        }
+                    }
+                    Ok(after) if after == before => {
+                        break 'step DiagResult::Failure {
+                            message: "channel did not change".to_string(),
+                        }
+                    }
+                    Ok(_) => {}
+                }
+                DiagResult::Success {
+                    detail: "ok".to_string(),
+                }
+            }
+        };
+        if let Some(before) = before {
+            let _ = radio.set_memory_channel(before).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "CH",
+            "memory_channel_down",
+            result,
+            start,
+        );
+    }
+
+    // QI/QR: QMB is a dedicated single slot, not one of the 117 numbered
+    // memory channels (confirmed via `IF`'s own P7 legend — 3=QMB, 4=QMB-MT
+    // vs. 1=Memory — planning/yaesu/findings.md). There is no direct "read
+    // QMB" method; `qmb_recall()` is the only way to observe its contents
+    // (by copying them into VFO-A), so that's used to capture the original
+    // contents before overwriting them with test data via `qmb_store()`.
+    {
+        let start = Instant::now();
+        let recall_ok = radio.qmb_recall().await.is_ok();
+        let orig_qmb = if recall_ok {
+            let freq = radio.get_vfo_a().await.ok();
+            let mode = radio.get_mode().await.ok();
+            freq.map(|f| (f, mode))
+        } else {
+            None
+        };
+        let result: DiagResult = 'step: {
+            let target = match Frequency::new(14_222_000) {
+                Ok(f) => f,
+                Err(e) => {
+                    break 'step DiagResult::Failure {
+                        message: format!("freq invalid: {e}"),
+                    }
+                }
+            };
+            if let Err(e) = radio.set_vfo_a(target).await {
+                break 'step DiagResult::Failure {
+                    message: format!("set_vfo_a failed: {e}"),
+                };
+            }
+            if let Err(e) = radio.qmb_store().await {
+                break 'step DiagResult::Failure {
+                    message: format!("qmb_store failed: {e}"),
+                };
+            }
+            if let Err(e) = radio.qmb_recall().await {
+                break 'step DiagResult::Failure {
+                    message: format!("qmb_recall failed: {e}"),
+                };
+            }
+            match radio.get_vfo_a().await {
+                Err(e) => {
+                    break 'step DiagResult::Failure {
+                        message: format!("verify get failed: {e}"),
+                    }
+                }
+                Ok(v) if v != target => {
+                    break 'step DiagResult::Failure {
+                        message: format!(
+                            "verify mismatch: got {} expected {}",
+                            v.hz(),
+                            target.hz()
+                        ),
+                    }
+                }
+                Ok(_) => {}
+            }
+            if orig_qmb.is_none() {
+                break 'step DiagResult::Success {
+                    detail: "ok (QMB was unreadable/empty before this test, so its \
+                              original contents could not be captured or restored)"
+                        .to_string(),
+                };
+            }
+            DiagResult::Success {
+                detail: "ok".to_string(),
+            }
+        };
+        if let Some((freq, mode)) = orig_qmb {
+            let _ = radio.set_vfo_a(freq).await;
+            if let Some(m) = mode {
+                let _ = radio.set_mode(m).await;
+            }
+            let _ = radio.qmb_store().await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "QI/QR",
+            "qmb_store + qmb_recall round trip",
+            result,
+            start,
+        );
+    }
+
+    // QS: no dedicated on/off pair exists anywhere in the master command
+    // table for Quick Split (findings.md), and no getter exists either —
+    // implemented (both here and by the radio itself) as a plain boolean
+    // toggle, so two calls always net identity regardless of the starting
+    // state.
+    {
+        let start = Instant::now();
+        let result = match radio.quick_split().await {
+            Err(e) => DiagResult::Failure {
+                message: format!("first toggle failed: {e}"),
+            },
+            Ok(()) => match radio.quick_split().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("second toggle (restore) failed: {e}"),
+                },
+                Ok(()) => DiagResult::Success {
+                    detail: "ok (toggled twice, net identity — no on/off pair or \
+                              getter exists for QS)"
+                        .to_string(),
+                },
+            },
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "QS",
+            "quick_split (toggle twice)",
+            result,
+            start,
+        );
+    }
+
+    // SV: reversible by construction — swap, verify, swap back.
+    {
+        let start = Instant::now();
+        let before_a = radio.get_vfo_a().await.ok();
+        let before_b = radio.get_vfo_b().await.ok();
+        let result = 'step: {
+            if let Err(e) = radio.swap_vfos().await {
+                break 'step DiagResult::Failure {
+                    message: format!("swap failed: {e}"),
+                };
+            }
+            if let (Some(a), Some(b)) = (before_a, before_b) {
+                let after_a = radio.get_vfo_a().await.ok();
+                let after_b = radio.get_vfo_b().await.ok();
+                if after_a != Some(b) || after_b != Some(a) {
+                    let _ = radio.swap_vfos().await;
+                    break 'step DiagResult::Failure {
+                        message: "verify mismatch: VFO-A/B did not swap as expected".to_string(),
+                    };
+                }
+            }
+            if let Err(e) = radio.swap_vfos().await {
+                break 'step DiagResult::Failure {
+                    message: format!("restore swap failed: {e}"),
+                };
+            }
+            DiagResult::Success {
+                detail: "ok".to_string(),
+            }
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "SV",
+            "swap_vfos (swap, verify, swap back)",
+            result,
+            start,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Batch: RT/RC/RD/RU/XT/CN/CT/IS
+    // -----------------------------------------------------------------
+    diag_set_get!(
+        "RT",
+        "set_rx_clarifier_on(true)",
+        radio.set_rx_clarifier_on(true),
+        radio.get_rx_clarifier_on(),
+        true
+    );
+    diag_get!("RT", "get_rx_clarifier_on", radio.get_rx_clarifier_on());
+
+    // RC/RD/RU exercise the shared `clarifier_offset_hz` field (via
+    // `get_information()`). Confirmed `RD`/`RU` are *absolute sets*, not
+    // relative steps (see `RadioSnapshot::clarifier_offset_hz`'s doc
+    // comment / the ADR) — full exact restoration of whatever the offset
+    // was before this run happens via the final `restore_state` pass.
+    {
+        let start = Instant::now();
+        let result = 'step: {
+            if let Err(e) = radio.clarifier_up(250).await {
+                break 'step DiagResult::Failure {
+                    message: format!("setup set failed: {e}"),
+                };
+            }
+            match radio.get_information().await {
+                Err(e) => {
+                    break 'step DiagResult::Failure {
+                        message: format!("setup verify failed: {e}"),
+                    }
+                }
+                Ok(i) if i.clarifier_offset_hz != 250 => {
+                    break 'step DiagResult::Failure {
+                        message: format!(
+                            "setup mismatch: got {} expected 250",
+                            i.clarifier_offset_hz
+                        ),
+                    }
+                }
+                Ok(_) => {}
+            }
+            if let Err(e) = radio.clarifier_clear().await {
+                break 'step DiagResult::Failure {
+                    message: format!("clear failed: {e}"),
+                };
+            }
+            match radio.get_information().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify get failed: {e}"),
+                },
+                Ok(i) if i.clarifier_offset_hz != 0 => DiagResult::Failure {
+                    message: format!("verify mismatch: got {} expected 0", i.clarifier_offset_hz),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "RC",
+            "clarifier_clear (after clarifier_up(250) setup)",
+            result,
+            start,
+        );
+    }
+    {
+        let start = Instant::now();
+        let result = match radio.clarifier_down(300).await {
+            Err(e) => DiagResult::Failure {
+                message: format!("set failed: {e}"),
+            },
+            Ok(()) => match radio.get_information().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify get failed: {e}"),
+                },
+                Ok(i) if i.clarifier_offset_hz != -300 => DiagResult::Failure {
+                    message: format!(
+                        "verify mismatch: got {} expected -300",
+                        i.clarifier_offset_hz
+                    ),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            },
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "RD",
+            "clarifier_down(300)",
+            result,
+            start,
+        );
+    }
+    {
+        let start = Instant::now();
+        let result = match radio.clarifier_up(150).await {
+            Err(e) => DiagResult::Failure {
+                message: format!("set failed: {e}"),
+            },
+            Ok(()) => match radio.get_information().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify get failed: {e}"),
+                },
+                Ok(i) if i.clarifier_offset_hz != 150 => DiagResult::Failure {
+                    message: format!(
+                        "verify mismatch: got {} expected 150",
+                        i.clarifier_offset_hz
+                    ),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            },
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "RU",
+            "clarifier_up(150)",
+            result,
+            start,
+        );
+    }
+    diag_set_get!(
+        "XT",
+        "set_tx_clarifier_on(true)",
+        radio.set_tx_clarifier_on(true),
+        radio.get_tx_clarifier_on(),
+        true
+    );
+    diag_get!("XT", "get_tx_clarifier_on", radio.get_tx_clarifier_on());
+    {
+        let target = ctcss_tone_hz(0).expect("index 0 is a valid standard CTCSS tone");
+        diag_set_get!(
+            "CN",
+            "set_ctcss_tone_hz",
+            radio.set_ctcss_tone_hz(target),
+            radio.get_ctcss_tone_hz(),
+            target
+        );
+    }
+    {
+        let target = dcs_code_number(0).expect("index 0 is a valid standard DCS code");
+        diag_set_get!(
+            "CN",
+            "set_dcs_code",
+            radio.set_dcs_code(target),
+            radio.get_dcs_code(),
+            target
+        );
+    }
+    diag_set_get!(
+        "CT",
+        "set_tone_squelch_mode(Off)",
+        radio.set_tone_squelch_mode(ToneSquelchMode::Off),
+        radio.get_tone_squelch_mode(),
+        ToneSquelchMode::Off
+    );
+    diag_set_get!(
+        "IS",
+        "set_if_shift_hz(0)",
+        radio.set_if_shift_hz(0),
+        radio.get_if_shift_hz(),
+        0i16
+    );
+
+    // -----------------------------------------------------------------
+    // Batch: KM/KP/KR/KS/KY/CS/ZI/BI/SD
+    // -----------------------------------------------------------------
+
+    // KM: write_keyer_memory/read_keyer_memory — self-contained on channel
+    // 2 (the `KY` step below uses channel 1). `write_keyer_memory`
+    // validates 1-50 printable ASCII chars client-side, before any wire
+    // I/O; if the channel was vacant (factory default: empty string) before
+    // this test, that same validation means it cannot be restored back to
+    // *exactly* empty — a genuine, documented protocol limitation, not an
+    // oversight.
+    {
+        let start = Instant::now();
+        let test_ch: u8 = 2;
+        let orig = radio.read_keyer_memory(test_ch).await.ok();
+        let result: DiagResult = 'step: {
+            if let Err(e) = radio.write_keyer_memory(test_ch, "DIAG TEST").await {
+                break 'step DiagResult::Failure {
+                    message: format!("write failed: {e}"),
+                };
+            }
+            match radio.read_keyer_memory(test_ch).await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(msg) if msg != "DIAG TEST" => DiagResult::Failure {
+                    message: format!("verify mismatch: got {msg:?}"),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        match orig.as_deref() {
+            Some(msg) if !msg.is_empty() => {
+                let _ = radio.write_keyer_memory(test_ch, msg).await;
+            }
+            _ => {}
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "KM",
+            "write_keyer_memory/read_keyer_memory (channel 2)",
+            result,
+            start,
+        );
+    }
+
+    {
+        let target: u16 = 700;
+        diag_set_get!(
+            "KP",
+            "set_keyer_pitch_hz",
+            radio.set_keyer_pitch_hz(target),
+            radio.get_keyer_pitch_hz(),
+            target
+        );
+    }
+    diag_set_get!(
+        "KR",
+        "set_keyer_enabled(true)",
+        radio.set_keyer_enabled(true),
+        radio.get_keyer_enabled(),
+        true
+    );
+    {
+        let target: u8 = 20;
+        diag_set_get!(
+            "KS",
+            "set_keyer_speed",
+            radio.set_keyer_speed(target),
+            radio.get_keyer_speed(),
+            target
+        );
+    }
+
+    // KY: play_keyer_memory — a real over-the-air CW transmission of a
+    // *pre-stored* keyer-memory message (NOT arbitrary text like ts570d's
+    // `send_cw` — see `ft991a.rs`'s `play_keyer_memory` doc comment), so
+    // it is gated behind `control.rs`'s `DiagWarning` -> `DiagCwCallsign`
+    // prompt (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`). Only
+    // ever sent with station identification ("TEST <CALLSIGN>"); a blank
+    // or cancelled prompt means this one step is `Skipped`, not attempted
+    // bare and not a hard failure — every other step still runs normally.
+    {
+        let start = Instant::now();
+        let result = match &cw_callsign {
+            None => DiagResult::Skipped {
+                reason: "no callsign supplied — CW keying test requires station ID".to_string(),
+            },
+            Some(callsign) => {
+                let test_ch: u8 = 1;
+                let message = format!("TEST {callsign}");
+                let orig = radio.read_keyer_memory(test_ch).await.ok();
+                let step_result: DiagResult = 'step: {
+                    if let Err(e) = radio.write_keyer_memory(test_ch, &message).await {
+                        break 'step DiagResult::Failure {
+                            message: format!("write failed: {e}"),
+                        };
+                    }
+                    if let Err(e) = radio
+                        .play_keyer_memory(test_ch, KeyerPlaybackMode::KeyerMemory)
+                        .await
+                    {
+                        break 'step DiagResult::Failure {
+                            message: format!("play failed: {e}"),
+                        };
+                    }
+                    DiagResult::Success {
+                        detail: format!("ok (sent \"{message}\")"),
+                    }
+                };
+                match orig.as_deref() {
+                    Some(msg) if !msg.is_empty() => {
+                        let _ = radio.write_keyer_memory(test_ch, msg).await;
+                    }
+                    _ => {}
+                }
+                step_result
+            }
+        };
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "KY",
+            "play_keyer_memory (CW test)",
+            result,
+            start,
+        );
+    }
+
+    diag_set_get!(
+        "CS",
+        "set_cw_spot_on(false)",
+        radio.set_cw_spot_on(false),
+        radio.get_cw_spot_on(),
+        false
+    );
+    diag_action!("ZI", "zero_in", radio.zero_in());
+    diag_set_get!(
+        "BI",
+        "set_break_in_on(true)",
+        radio.set_break_in_on(true),
+        radio.get_break_in_on(),
+        true
+    );
+    {
+        let target: u16 = 50;
+        diag_set_get!(
+            "SD",
+            "set_semi_break_in_delay",
+            radio.set_semi_break_in_delay(target),
+            radio.get_semi_break_in_delay(),
+            target
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Batch: SC/VX/VD/VG/BY
+    // -----------------------------------------------------------------
+    diag_set_get!(
+        "SC",
+        "set_scan_state(Off)",
+        radio.set_scan_state(ScanState::Off),
+        radio.get_scan_state(),
+        ScanState::Off
+    );
+    diag_set_get!(
+        "VX",
+        "set_vox_on(false)",
+        radio.set_vox_on(false),
+        radio.get_vox_on(),
+        false
+    );
+    {
+        let target: u16 = 300;
+        diag_set_get!(
+            "VD",
+            "set_vox_delay",
+            radio.set_vox_delay(target),
+            radio.get_vox_delay(),
+            target
+        );
+    }
+    {
+        let target: u8 = 5;
+        diag_set_get!(
+            "VG",
+            "set_vox_gain",
+            radio.set_vox_gain(target),
+            radio.get_vox_gain(),
+            target
+        );
+    }
+    diag_get!("BY", "get_rx_busy", radio.get_rx_busy());
+
+    // -----------------------------------------------------------------
+    // Batch: RA/PA/NB/NL/NR/RL/GT/CO/BP/BC/NA/SH
+    // -----------------------------------------------------------------
+    diag_set_get!(
+        "RA",
+        "set_attenuator_on(false)",
+        radio.set_attenuator_on(false),
+        radio.get_attenuator_on(),
+        false
+    );
+    diag_set_get!(
+        "PA",
+        "set_preamp_mode(IPO)",
+        radio.set_preamp_mode(PreampMode::Ipo),
+        radio.get_preamp_mode(),
+        PreampMode::Ipo
+    );
+    diag_set_get!(
+        "NB",
+        "set_noise_blanker_on(true)",
+        radio.set_noise_blanker_on(true),
+        radio.get_noise_blanker_on(),
+        true
+    );
+    {
+        let target: u8 = 1;
+        diag_set_get!(
+            "NL",
+            "set_noise_blanker_level",
+            radio.set_noise_blanker_level(target),
+            radio.get_noise_blanker_level(),
+            target
+        );
+    }
+    diag_set_get!(
+        "NR",
+        "set_noise_reduction_on(true)",
+        radio.set_noise_reduction_on(true),
+        radio.get_noise_reduction_on(),
+        true
+    );
+    {
+        let target: u8 = 1;
+        diag_set_get!(
+            "RL",
+            "set_noise_reduction_level",
+            radio.set_noise_reduction_level(target),
+            radio.get_noise_reduction_level(),
+            target
+        );
+    }
+    diag_set_get!(
+        "GT",
+        "set_agc_mode(Fast)",
+        radio.set_agc_mode(AgcMode::Fast),
+        radio.get_agc_mode(),
+        AgcMode::Fast
+    );
+    diag_set_get!(
+        "CO",
+        "set_contour_on(false)",
+        radio.set_contour_on(false),
+        radio.get_contour_on(),
+        false
+    );
+    {
+        let target: u16 = 1000;
+        diag_set_get!(
+            "CO",
+            "set_contour_frequency_hz",
+            radio.set_contour_frequency_hz(target),
+            radio.get_contour_frequency_hz(),
+            target
+        );
+    }
+    diag_set_get!(
+        "CO",
+        "set_apf_on(false)",
+        radio.set_apf_on(false),
+        radio.get_apf_on(),
+        false
+    );
+    diag_set_get!(
+        "CO",
+        "set_apf_frequency_hz(0)",
+        radio.set_apf_frequency_hz(0),
+        radio.get_apf_frequency_hz(),
+        0i16
+    );
+    diag_set_get!(
+        "BP",
+        "set_manual_notch_on(false)",
+        radio.set_manual_notch_on(false),
+        radio.get_manual_notch_on(),
+        false
+    );
+    {
+        let target: u16 = 1000;
+        diag_set_get!(
+            "BP",
+            "set_manual_notch_frequency_hz",
+            radio.set_manual_notch_frequency_hz(target),
+            radio.get_manual_notch_frequency_hz(),
+            target
+        );
+    }
+    diag_set_get!(
+        "BC",
+        "set_auto_notch_on(false)",
+        radio.set_auto_notch_on(false),
+        radio.get_auto_notch_on(),
+        false
+    );
+    diag_set_get!(
+        "NA",
+        "set_narrow_on(false)",
+        radio.set_narrow_on(false),
+        radio.get_narrow_on(),
+        false
+    );
+    {
+        let target: u8 = 10;
+        diag_set_get!(
+            "SH",
+            "set_filter_width_index",
+            radio.set_filter_width_index(target),
+            radio.get_filter_width_index(),
+            target
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Batch: MG/PL/PR/ML
+    // -----------------------------------------------------------------
+    {
+        let target: u8 = 50;
+        diag_set_get!(
+            "MG",
+            "set_mic_gain",
+            radio.set_mic_gain(target),
+            radio.get_mic_gain(),
+            target
+        );
+    }
+    {
+        let target: u8 = 50;
+        diag_set_get!(
+            "PL",
+            "set_speech_processor_level",
+            radio.set_speech_processor_level(target),
+            radio.get_speech_processor_level(),
+            target
+        );
+    }
+    diag_set_get!(
+        "PR",
+        "set_speech_processor_on(false)",
+        radio.set_speech_processor_on(false),
+        radio.get_speech_processor_on(),
+        false
+    );
+    diag_set_get!(
+        "PR",
+        "set_parametric_mic_eq_on(false)",
+        radio.set_parametric_mic_eq_on(false),
+        radio.get_parametric_mic_eq_on(),
+        false
+    );
+    diag_set_get!(
+        "ML",
+        "set_monitor_on(false)",
+        radio.set_monitor_on(false),
+        radio.get_monitor_on(),
+        false
+    );
+    {
+        let target: u8 = 50;
+        diag_set_get!(
+            "ML",
+            "set_monitor_level",
+            radio.set_monitor_level(target),
+            radio.get_monitor_level(),
+            target
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Batch: BS/BU/BD/FS/ED/EU/EK/DN/UP
+    // -----------------------------------------------------------------
+    // No `get_band` getter exists anywhere on this trait (checked in
+    // full) — `BS`/`BU`/`BD` can only be verified `Ok`-only, an honest
+    // trait-surface gap rather than a guessed frequency-range check
+    // (selecting a band doesn't necessarily retune VFO-A into that band's
+    // edges — it's a band-stacking-register concept). VFO-A/mode are
+    // restored by the final `restore_state` regardless of what these do.
+    diag_action!(
+        "BS",
+        "set_band(FourteenMHz)",
+        radio.set_band(Band::FourteenMHz)
+    );
+    diag_action!("BU", "band_up", radio.band_up());
+    diag_action!("BD", "band_down", radio.band_down());
+    diag_set_get!(
+        "FS",
+        "set_fine_step(false)",
+        radio.set_fine_step(false),
+        radio.get_fine_step(),
+        false
+    );
+    // ED/EU/EK/ZI mutate no persisted state at all in this radio's own
+    // implementation (confirmed via `ft991a_radio.rs`'s emulator source —
+    // "structurally and semantically validated... but mutate no persisted
+    // Ft991aState field"), so `Ok`-only verification is the most this
+    // engine (or real hardware, per the manual's own silence here) can ever
+    // check.
+    diag_action!(
+        "ED",
+        "encoder_down(Main,1)",
+        radio.encoder_down(EncoderSelector::Main, 1)
+    );
+    diag_action!(
+        "EU",
+        "encoder_up(Main,1)",
+        radio.encoder_up(EncoderSelector::Main, 1)
+    );
+    diag_action!("EK", "ent_key", radio.ent_key());
+    // DN/UP (mic_down/mic_up) step `vfo_a_hz` by a fixed amount — already
+    // `Radio`-trait methods, just previously unreachable by the read-only
+    // engine (zero-width Action commands, no query form). Treated exactly
+    // like `ts570d`'s own `mic_up`/`mic_down` steps: `Ok`-only, relying on
+    // the final VFO-A restore (safe under normal test conditions, nowhere
+    // near the saturating band edges).
+    diag_action!("DN", "mic_down", radio.mic_down());
+    diag_action!("UP", "mic_up", radio.mic_up());
+
+    // -----------------------------------------------------------------
+    // Batch: AC/AI/DA/DT/LK/OI/FT/TS/MX, LM/PB (DVS, get-only)
+    // -----------------------------------------------------------------
+    // AC (antenna tuner state) deliberately stays get-only: `state=2`
+    // ("start tuning") is plausibly RF-relevant on real hardware (a tuning
+    // cycle typically keys a low-power test carrier) and antenna-tuner
+    // testing was never part of the 28 commands this round's full-parity
+    // work targeted — same conservative-scope reasoning as `MX`/DVS below.
+    diag_get!(
+        "AC",
+        "get_antenna_tuner_state",
+        radio.get_antenna_tuner_state()
+    );
+    diag_set_get!(
+        "AI",
+        "set_auto_info_on(false)",
+        radio.set_auto_info_on(false),
+        radio.get_auto_info_on(),
+        false
+    );
+    {
+        let led: u8 = 1;
+        let tft: u8 = 8;
+        diag_set_get!(
+            "DA",
+            "set_dimmer",
+            radio.set_dimmer(led, tft),
+            radio.get_dimmer(),
+            (led, tft)
+        );
+    }
+
+    // DT: date/time/time-zone — three independent self-contained
+    // snapshot/write/verify/restore steps.
+    {
+        let start = Instant::now();
+        let orig = radio.read_date().await.ok();
+        let result: DiagResult = 'step: {
+            if let Err(e) = radio.write_date(2026, 7, 26).await {
+                break 'step DiagResult::Failure {
+                    message: format!("write failed: {e}"),
+                };
+            }
+            match radio.read_date().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(d) if d != (2026, 7, 26) => DiagResult::Failure {
+                    message: format!("verify mismatch: got {d:?}"),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        if let Some((y, m, d)) = orig {
+            let _ = radio.write_date(y, m, d).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "DT",
+            "write_date/read_date",
+            result,
+            start,
+        );
+    }
+    {
+        let start = Instant::now();
+        let orig = radio.read_time().await.ok();
+        let result: DiagResult = 'step: {
+            if let Err(e) = radio.write_time(12, 34, 56).await {
+                break 'step DiagResult::Failure {
+                    message: format!("write failed: {e}"),
+                };
+            }
+            match radio.read_time().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(t) if t != (12, 34, 56) => DiagResult::Failure {
+                    message: format!("verify mismatch: got {t:?}"),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        if let Some((h, m, s)) = orig {
+            let _ = radio.write_time(h, m, s).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "DT",
+            "write_time/read_time",
+            result,
+            start,
+        );
+    }
+    {
+        let start = Instant::now();
+        let orig = radio.read_time_zone_offset().await.ok();
+        let result: DiagResult = 'step: {
+            if let Err(e) = radio.write_time_zone_offset(0).await {
+                break 'step DiagResult::Failure {
+                    message: format!("write failed: {e}"),
+                };
+            }
+            match radio.read_time_zone_offset().await {
+                Err(e) => DiagResult::Failure {
+                    message: format!("verify read failed: {e}"),
+                },
+                Ok(v) if v != 0 => DiagResult::Failure {
+                    message: format!("verify mismatch: got {v}"),
+                },
+                Ok(_) => DiagResult::Success {
+                    detail: "ok".to_string(),
+                },
+            }
+        };
+        if let Some(v) = orig {
+            let _ = radio.write_time_zone_offset(v).await;
+        }
+        record_diag_outcome(
+            &mut outcomes,
+            &mut on_progress,
+            "DT",
+            "write_time_zone_offset/read_time_zone_offset",
+            result,
+            start,
+        );
+    }
+
+    diag_set_get!(
+        "LK",
+        "set_frequency_lock(false)",
+        radio.set_frequency_lock(false),
+        radio.get_frequency_lock(),
+        false
+    );
+    diag_get!(
+        "OI",
+        "get_opposite_band_information",
+        radio.get_opposite_band_information()
+    );
+    diag_set_get!(
+        "FT",
+        "set_tx_vfo",
+        radio.set_tx_vfo(0),
+        radio.get_tx_vfo(),
+        0u8
+    );
+    diag_set_get!(
+        "TS",
+        "set_txw_on(false)",
+        radio.set_txw_on(false),
+        radio.get_txw_on(),
+        false
+    );
+    // MX (MOX — manual transmitter key) deliberately stays get-only: setting
+    // it ON keys the transmitter directly, and MOX testing was never part
+    // of the 28 commands this round's full-parity work targeted.
+    diag_get!("MX", "get_mox_on", radio.get_mox_on());
+    // DVS (LM/PB) deliberately stays get-only: start/stop recording or
+    // playback has real physical side effects (overwrites a voice memory
+    // slot) and, like AC/MX above, was never part of the 28 commands this
+    // round's full-parity work targeted.
+    diag_get!(
+        "LM",
+        "get_dvs_recording_channel",
+        radio.get_dvs_recording_channel()
+    );
+    diag_get!(
+        "PB",
+        "get_dvs_playback_channel",
+        radio.get_dvs_playback_channel()
+    );
+
+    // Bonus: `get_repeater_shift`/`set_repeater_shift` have no dedicated
+    // top-level command-table row of their own (derived from the same
+    // `offset_type` field embedded in `MW`/`MR`/`MT`/`IF`), so they're not
+    // one of the 91 — included anyway for full trait-surface coverage.
+    diag_set_get!(
+        "OS*",
+        "set_repeater_shift(Simplex)",
+        radio.set_repeater_shift(RepeaterShift::Simplex),
+        radio.get_repeater_shift(),
+        RepeaterShift::Simplex
+    );
+
+    // Restore all snapshotted radio state unconditionally (best-effort).
+    restore_state(radio, snapshot).await;
+
+    DiagSummary { outcomes }
+}
+
 /// Draw one live-progress diagnostics frame (header/status/errors plus the
 /// diagnostics panel itself) — factored out so it can be called both once
-/// up front (0 outcomes yet) and from inside the [`run_diagnostics_with`]
+/// up front (0 outcomes yet) and from inside [`run_diagnostics_task`]'s
 /// progress callback below, without duplicating [`draw_frame`]'s own
 /// header/status/errors setup.
-///
-/// [`run_diagnostics_with`]: radio::Ft991aExtras::run_diagnostics_with
 fn draw_diagnostics_frame(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     display: &Ft991aDisplay,
-    outcomes: &[radio::DiagnosticOutcome],
+    outcomes: &[DiagOutcome],
     total: usize,
 ) -> UiResult<()> {
     terminal.draw(|f| {
@@ -803,18 +2663,14 @@ fn draw_diagnostics_frame(
     Ok(())
 }
 
-/// Run the shared diagnostics engine
-/// (`docs/adr/0004-shared-diagnostics-screen.md`) against
-/// [`radio::FT991A_COMMAND_TABLE`], redrawing the screen after every
-/// command outcome for live progress, and return the [`ControlState`] to
-/// transition to once it completes.
+/// Run [`run_diagnostics_task`], redrawing the screen after every step's
+/// outcome for live progress, and return the [`ControlState`] to transition
+/// to once it completes.
 ///
-/// This is the one place in this crate that calls
-/// [`Terminal::draw`] directly from inside a synchronous callback
-/// ([`radio::Ft991aExtras::run_diagnostics_with`]'s `on_progress:
-/// FnMut(&DiagnosticOutcome)` is deliberately **not** `async` — see that
-/// trait method's own doc comment) rather than through the normal
-/// once-per-loop-iteration [`draw_frame`] call. This works because
+/// This is the one place in this crate that calls [`Terminal::draw`]
+/// directly from inside a synchronous callback (`on_progress: FnMut(&
+/// DiagOutcome)` is deliberately **not** `async`) rather than through the
+/// normal once-per-loop-iteration [`draw_frame`] call. This works because
 /// [`Terminal::draw`] is itself a plain synchronous function (ratatui does
 /// no I/O awaiting of its own), so calling it from inside a sync closure
 /// that a single `.await`ed diagnostics run invokes repeatedly is exactly
@@ -822,42 +2678,29 @@ fn draw_diagnostics_frame(
 /// Blocks the whole event loop for the duration of the run (this crate's
 /// existing single-sequential-loop architecture, per `terminal.rs`'s own
 /// module docs, has no separate task to keep servicing key events
-/// meanwhile) — acceptable here since the run itself is bounded (91
-/// commands × up to `DEFAULT_COMMAND_TIMEOUT` = 2s each in the worst case
-/// of every command failing to answer; in the common case of a live or
-/// emulated radio, every non-`Skipped` command completes in well under a
-/// second and the whole run is correspondingly fast).
+/// meanwhile) — acceptable here since the run itself is bounded
+/// (`DIAG_STEP_COUNT` steps, single pass, each a bounded typed method
+/// call).
 async fn run_diagnostics_screen<R: Radio + Ft991aExtras + CwKeying>(
     radio: &mut R,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     display: &Ft991aDisplay,
+    cw_callsign: Option<String>,
 ) -> ControlState {
-    let total = radio::FT991A_COMMAND_TABLE.definitions().len();
-    let mut outcomes: Vec<radio::DiagnosticOutcome> = Vec::with_capacity(total);
+    let mut outcomes: Vec<DiagOutcome> = Vec::with_capacity(DIAG_STEP_COUNT);
 
     // Draw the initial "0/total" frame before the first probe goes out —
     // otherwise the screen would appear frozen on the prior `ControlState`
     // until the first outcome arrives.
-    let _ = draw_diagnostics_frame(terminal, display, &outcomes, total);
+    let _ = draw_diagnostics_frame(terminal, display, &outcomes, DIAG_STEP_COUNT);
 
-    let result = radio
-        .run_diagnostics_with(|outcome| {
-            outcomes.push(outcome.clone());
-            let _ = draw_diagnostics_frame(terminal, display, &outcomes, total);
-        })
-        .await;
+    let summary = run_diagnostics_task(radio, cw_callsign, |outcome| {
+        outcomes.push(outcome.clone());
+        let _ = draw_diagnostics_frame(terminal, display, &outcomes, DIAG_STEP_COUNT);
+    })
+    .await;
 
-    match result {
-        Ok(summary) => ControlState::Diagnostics { summary, cursor: 0 },
-        // `Ft991a<S>`'s real implementation never returns `Err` here (only
-        // the trait's own `NotImplemented` default does, which this app's
-        // concrete wiring never uses) — kept as a real branch, not
-        // `unwrap()`ed away, since nothing enforces that structurally.
-        Err(e) => ControlState::Feedback {
-            message: format!("Error: {e}"),
-            is_error: true,
-        },
-    }
+    ControlState::Diagnostics { summary, cursor: 0 }
 }
 
 /// Run the terminal UI against a live [`radio::Radio`] implementation.
@@ -928,8 +2771,9 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
                 match handle_key(key, &mut control, &display) {
                     KeyResult::Quit => break,
                     KeyResult::Continue => {}
-                    KeyResult::RunDiagnostics => {
-                        control = run_diagnostics_screen(radio, terminal, &display).await;
+                    KeyResult::RunDiagnostics(cw_callsign) => {
+                        control =
+                            run_diagnostics_screen(radio, terminal, &display, cw_callsign).await;
                     }
                     KeyResult::Execute(action) => {
                         let (desc, result) = execute_action(radio, action, &mut display).await;
@@ -1129,6 +2973,53 @@ mod tests {
                 return Err(RadioError::NotImplemented);
             }
             self.ex_menu_calls.push((p1, value));
+            Ok(())
+        }
+
+        // Overridden so the diagnostics-engine tests below can exercise the
+        // `VM`/QMB/clarifier steps (which all read `get_information()`)
+        // without every one of them falling back to `NotImplemented`.
+        async fn get_information(&mut self) -> RadioResult<radio::ChannelStatusFields> {
+            if self.fail_all {
+                return Err(RadioError::NotImplemented);
+            }
+            Ok(radio::ChannelStatusFields {
+                channel: 0,
+                frequency_hz: self.vfo_a.as_ref().map(|f| f.hz()).unwrap_or(14_250_000),
+                clarifier_offset_hz: 0,
+                rx_clarifier_on: false,
+                tx_clarifier_on: false,
+                mode: Mode::Usb.as_u8(),
+                select: 0,
+                tone_status: 0,
+                offset_type: 0,
+            })
+        }
+
+        // Overridden so `test_run_diagnostics_task_ky_step_sends_when_callsign_supplied`
+        // can verify the `KY` step actually attempts playback (not just that
+        // it's skipped) — mirrors `set_ex_menu_item`'s own "override for a
+        // specific test's sake" precedent above.
+        async fn read_keyer_memory(&mut self, _channel: u8) -> RadioResult<String> {
+            if self.fail_all {
+                return Err(RadioError::NotImplemented);
+            }
+            Ok(String::new())
+        }
+        async fn write_keyer_memory(&mut self, _channel: u8, _message: &str) -> RadioResult<()> {
+            if self.fail_all {
+                return Err(RadioError::NotImplemented);
+            }
+            Ok(())
+        }
+        async fn play_keyer_memory(
+            &mut self,
+            _channel: u8,
+            _mode: radio::KeyerPlaybackMode,
+        ) -> RadioResult<()> {
+            if self.fail_all {
+                return Err(RadioError::NotImplemented);
+            }
             Ok(())
         }
     }
@@ -1520,5 +3411,119 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(RadioError::NotImplemented)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostics engine (`docs/adr/0006-hand-coded-full-parity-
+    // diagnostics.md`) — structural/safety-property tests. Full behavioral
+    // verification (real set/verify/restore round trips against real state)
+    // is done against the live `emulator`, not mocked here — see the ADR's
+    // "Verified" section. `MockRadio` mostly falls back to `NotImplemented`
+    // for the ~130 methods this engine calls, so these tests check
+    // resilience/structure (no panics, correct step count, the CW-skip
+    // contract, and a real snapshot/restore round trip on the one field
+    // `MockRadio` backs with real state), not per-step pass/fail correctness.
+    // -----------------------------------------------------------------------
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_diag_step_count_matches_actual_output() {
+        let mut radio = MockRadio::ok();
+        let summary = run_diagnostics_task(&mut radio, None, |_| {}).await;
+        assert_eq!(summary.total(), DIAG_STEP_COUNT);
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_diag_runs_to_completion_even_when_almost_everything_fails() {
+        // `MockRadio::failing()` returns `Err(NotImplemented)` for nearly
+        // every method this engine calls — confirms no step panics or
+        // aborts the run early.
+        let mut radio = MockRadio::failing();
+        let summary = run_diagnostics_task(&mut radio, None, |_| {}).await;
+        assert_eq!(summary.total(), DIAG_STEP_COUNT);
+        assert!(
+            crate::diagnostics::count_failed(&summary.outcomes) > 0,
+            "expected at least one Failure against an all-NotImplemented radio"
+        );
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_diag_ky_step_skipped_without_callsign_but_run_still_completes() {
+        let mut radio = MockRadio::ok();
+        let summary = run_diagnostics_task(&mut radio, None, |_| {}).await;
+        assert_eq!(summary.total(), DIAG_STEP_COUNT);
+        let ky = summary
+            .outcomes
+            .iter()
+            .find(|o| o.code == "KY")
+            .expect("KY step must be present");
+        assert!(
+            matches!(ky.result, DiagResult::Skipped { .. }),
+            "KY step should be Skipped when no callsign is supplied, got {:?}",
+            ky.result
+        );
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_diag_ky_step_attempts_playback_when_callsign_supplied() {
+        let mut radio = MockRadio::ok();
+        let summary = run_diagnostics_task(&mut radio, Some("W1AW".to_string()), |_| {}).await;
+        let ky = summary
+            .outcomes
+            .iter()
+            .find(|o| o.code == "KY")
+            .expect("KY step must be present");
+        assert!(
+            ky.result.is_success(),
+            "KY step should succeed against MockRadio::ok() with a supplied callsign, got {:?}",
+            ky.result
+        );
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_diag_progress_callback_invoked_once_per_step() {
+        let mut radio = MockRadio::ok();
+        let mut progress_calls = 0usize;
+        let summary = run_diagnostics_task(&mut radio, None, |_| progress_calls += 1).await;
+        assert_eq!(progress_calls, summary.total());
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_snapshot_restore_round_trips_vfo_a() {
+        // `MockRadio::vfo_a` is real field-backed state (unlike almost every
+        // other field, which is a stateless `fail_all`-gated stub) — the one
+        // field this mock can prove `restore_state` actually writes back,
+        // since the engine's own `FA` steps deliberately mutate it away
+        // from its starting value.
+        let mut radio = MockRadio::ok();
+        let original = radio.get_vfo_a().await.unwrap();
+        assert_ne!(original.hz(), 14_195_000, "test fixture sanity check");
+
+        let snapshot = snapshot_state(&mut radio).await;
+        assert_eq!(snapshot.vfo_a, Some(original));
+
+        // Simulate what a diagnostic step does: mutate away from the
+        // original.
+        radio
+            .set_vfo_a(Frequency::new(14_195_000).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(radio.get_vfo_a().await.unwrap().hz(), 14_195_000);
+
+        restore_state(&mut radio, snapshot).await;
+        assert_eq!(
+            radio.get_vfo_a().await.unwrap(),
+            original,
+            "restore_state must put VFO-A back to its pre-run value"
+        );
+    }
+
+    #[monoio::test(driver = "legacy", timer_enabled = true)]
+    async fn test_snapshot_state_stores_none_on_getter_failure_not_panic() {
+        let mut radio = MockRadio::failing();
+        let snapshot = snapshot_state(&mut radio).await;
+        assert_eq!(snapshot.vfo_a, None);
+        // Restoring an all-`None` snapshot must not panic even though every
+        // setter also fails.
+        restore_state(&mut radio, snapshot).await;
     }
 }

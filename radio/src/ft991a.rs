@@ -2732,7 +2732,6 @@ where
     async fn set_ex_menu_item(&mut self, p1: u16, value: i32) -> RadioResult<()> {
         Ft991a::set_ex_menu_item(self, p1, value).await
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -5825,5 +5824,4 @@ mod tests {
             }
         }
     }
-
 }

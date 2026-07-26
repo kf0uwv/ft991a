@@ -37,6 +37,7 @@
 //! `src/main.rs`), which satisfies all three bounds unconditionally today.
 
 pub(crate) mod control;
+pub(crate) mod diagnostics;
 pub(crate) mod layout;
 mod terminal;
 

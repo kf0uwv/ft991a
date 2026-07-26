@@ -32,15 +32,19 @@
 //! `GroupMenu`'s fixed, never-scrolled command column), needed because `EX`
 //! sub-groups hold up to 45 items.
 //!
-//! A `Diagnostic` arm was finally added
-//! (`docs/adr/0004-shared-diagnostics-screen.md`, reversing §6.1/§11.6 item
-//! 2's earlier "not warranted yet" call now that `radio-cat-rs` ships a
-//! shared engine to back it): `draw_diagnostics_panel` is the same
-//! scrolling-list shape as `draw_ex_sub_group_menu`/`draw_profile_list`,
-//! plus `draw_diagnostics_live` (a thin wrapper adding the outer " Controls
-//! " block) for `terminal.rs` to call directly while a run is still in
-//! progress, before any `ControlState::Diagnostics` exists yet to dispatch
-//! through `draw_control_panel` normally.
+//! A `Diagnostics` arm was added in the original `docs/adr/0004-shared-
+//! diagnostics-screen.md` and reworked in `docs/adr/0006-hand-coded-full-
+//! parity-diagnostics.md` once the engine itself moved from a wrapped
+//! `cat-diagnostics` read-only probe to a hand-coded, ts570d-parity
+//! test-and-restore engine living in this crate: `draw_diagnostics_panel`
+//! is the same scrolling-list shape as `draw_ex_sub_group_menu`/
+//! `draw_profile_list`, plus `draw_diagnostics_live` (a thin wrapper adding
+//! the outer " Controls " block) for `terminal.rs` to call directly while a
+//! run is still in progress, before any `ControlState::Diagnostics` exists
+//! yet to dispatch through `draw_control_panel` normally.
+//! `draw_diag_warning_panel` (ADR 0006) is the pre-run transmit-safety
+//! gate's own distinctly red-bordered screen, replacing the whole panel
+//! rather than sharing the generic " Controls " block.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -397,6 +401,16 @@ fn build_menu_column(items: &[(char, &'static str)]) -> Vec<Line<'static>> {
 /// `ListSelect`/`Feedback` 3-line layout carried over unchanged from Wave 2
 /// (§6.3).
 pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
+    // The transmit-safety warning gate replaces the whole panel with its
+    // own distinctly red-bordered block, not the generic " Controls "
+    // frame every other state shares — mirrors `ts570d`'s own
+    // `draw_diag_warning_panel` call site exactly
+    // (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`).
+    if let ControlState::DiagWarning = state {
+        draw_diag_warning_panel(f, area);
+        return;
+    }
+
     let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);
     let inner = outer_block.inner(area);
     f.render_widget(outer_block, area);
@@ -409,6 +423,9 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
             items.push(('Q', "Quit"));
             f.render_widget(Paragraph::new(build_menu_column(&items)), inner);
         }
+
+        // Handled by the early return above — never reached from here.
+        ControlState::DiagWarning => {}
 
         ControlState::GroupMenu { group, .. } => {
             let labels = group_command_labels(*group);
@@ -555,9 +572,10 @@ pub fn draw_control_panel(f: &mut Frame, area: Rect, state: &ControlState) {
                     f.render_widget(Paragraph::new("Press any key to continue"), lines[2]);
                 }
 
-                // Menu, GroupMenu, ExSubGroupMenu, ProfileList, and
-                // Diagnostics are handled above.
+                // Menu, DiagWarning, GroupMenu, ExSubGroupMenu, ProfileList,
+                // and Diagnostics are handled above.
                 ControlState::Menu
+                | ControlState::DiagWarning
                 | ControlState::GroupMenu { .. }
                 | ControlState::ExSubGroupMenu { .. }
                 | ControlState::ProfileList { .. }
@@ -723,31 +741,100 @@ fn draw_profile_list(
 }
 
 // ---------------------------------------------------------------------------
-// draw_diagnostics_panel — `docs/adr/0004-shared-diagnostics-screen.md`
+// draw_diag_warning_panel — pre-diagnostic TX safety gate
+// (`docs/adr/0006-hand-coded-full-parity-diagnostics.md`)
 // ---------------------------------------------------------------------------
 
-/// One-line (status glyph, color) pair for a [`radio::DiagnosticResult`],
+/// Draw the hard-to-miss warning shown before a diagnostic run starts.
+/// Mirrors `ts570d::ui::layout::draw_diag_warning_panel` closely (same
+/// wording, same red-bordered treatment) for cross-repo consistency.
+///
+/// The diagnostic run genuinely keys the transmitter (PTT, and CW if a
+/// callsign is supplied on the next screen). Transmitting into an open or
+/// mismatched load can damage the transceiver's final amplifier stage, so
+/// this screen requires an explicit acknowledgment before anything is sent
+/// to the radio.
+fn draw_diag_warning_panel(f: &mut Frame, area: Rect) {
+    let outer_block = Block::default()
+        .title(" \u{26a0} DIAGNOSTICS \u{2014} TRANSMIT WARNING \u{26a0} ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+    let inner = outer_block.inner(area);
+    f.render_widget(outer_block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "This diagnostic run will KEY THE TRANSMITTER.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("It briefly transmits PTT, and sends a real CW test"),
+        Line::from("message (via a keyer memory channel) if you supply a"),
+        Line::from("callsign on the next screen."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "The radio MUST be connected to a proper antenna or dummy load.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Transmitting into an open or mismatched load can damage"),
+        Line::from("the transceiver's final amplifier stage."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[Enter/Y]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" I have a load connected, proceed   "),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// draw_diagnostics_panel — `docs/adr/0006-hand-coded-full-parity-
+// diagnostics.md`
+// ---------------------------------------------------------------------------
+
+/// One-line (status glyph, color) pair for a [`crate::diagnostics::DiagResult`],
 /// mirroring [`tx_state_label`]/[`rts_label`]'s own (text, color) idiom.
-fn diagnostic_result_label(result: &radio::DiagnosticResult) -> (&'static str, Color) {
+fn diagnostic_result_label(result: &crate::diagnostics::DiagResult) -> (&'static str, Color) {
+    use crate::diagnostics::DiagResult;
     match result {
-        radio::DiagnosticResult::Success { .. } => ("OK", Color::Green),
-        radio::DiagnosticResult::Failure { .. } => ("FAIL", Color::Red),
-        radio::DiagnosticResult::Timeout => ("TIMEOUT", Color::Red),
-        radio::DiagnosticResult::Skipped { .. } => ("SKIP", Color::DarkGray),
+        DiagResult::Success { .. } => ("OK", Color::Green),
+        DiagResult::Failure { .. } => ("FAIL", Color::Red),
+        DiagResult::Skipped { .. } => ("SKIP", Color::DarkGray),
     }
 }
 
 /// Draw the diagnostics screen: same scrolling-list shape as
-/// [`draw_profile_list`]/[`draw_ex_sub_group_menu`], since
-/// [`radio::FT991A_COMMAND_TABLE`] has 90+ entries.
+/// [`draw_profile_list`]/[`draw_ex_sub_group_menu`], since this engine has
+/// 100+ steps.
 ///
 /// Serves **two** call sites with one shared rendering function:
 /// - **Live progress**, called directly by `terminal.rs`'s diagnostics
-///   runner (`cursor: None`) once per [`radio::DiagnosticOutcome`] as the
-///   run proceeds — `outcomes` is a growing prefix of the final list,
-///   `total` is [`radio::FT991A_COMMAND_TABLE`]'s full length (known
-///   up-front, unlike `outcomes.len()`), and the view auto-scrolls to
-///   follow the most recent result.
+///   runner (`cursor: None`) once per [`crate::diagnostics::DiagOutcome`] as
+///   the run proceeds — `outcomes` is a growing prefix of the final list,
+///   `total` is the engine's total step count (known up-front, unlike
+///   `outcomes.len()`), and the view auto-scrolls to follow the most recent
+///   result.
 /// - **The completed report**, via `draw_control_panel`'s
 ///   `ControlState::Diagnostics` arm (`cursor: Some(n)`) — `outcomes` is
 ///   now the final, complete list (`outcomes.len() == total`), and the
@@ -756,10 +843,12 @@ fn diagnostic_result_label(result: &radio::DiagnosticResult) -> (&'static str, C
 pub(crate) fn draw_diagnostics_panel(
     f: &mut Frame,
     area: Rect,
-    outcomes: &[radio::DiagnosticOutcome],
+    outcomes: &[crate::diagnostics::DiagOutcome],
     total: usize,
     cursor: Option<usize>,
 ) {
+    use crate::diagnostics::DiagResult;
+
     let header_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -773,20 +862,9 @@ pub(crate) fn draw_diagnostics_panel(
     let header = if running {
         format!("Running diagnostics... ({}/{total})", outcomes.len())
     } else {
-        let passed = outcomes.iter().filter(|o| o.result.is_success()).count();
-        let failed = outcomes
-            .iter()
-            .filter(|o| {
-                matches!(
-                    o.result,
-                    radio::DiagnosticResult::Failure { .. } | radio::DiagnosticResult::Timeout
-                )
-            })
-            .count();
-        let skipped = outcomes
-            .iter()
-            .filter(|o| matches!(o.result, radio::DiagnosticResult::Skipped { .. }))
-            .count();
+        let passed = crate::diagnostics::count_passed(outcomes);
+        let failed = crate::diagnostics::count_failed(outcomes);
+        let skipped = crate::diagnostics::count_skipped(outcomes);
         format!(
             "Diagnostics — {passed} passed / {failed} failed / {skipped} skipped / {total} total"
         )
@@ -838,16 +916,11 @@ pub(crate) fn draw_diagnostics_panel(
         if let Some(outcome) = outcomes.get(cursor) {
             lines.push(Line::from(""));
             let detail = match &outcome.result {
-                radio::DiagnosticResult::Success { response } => {
-                    format!("Request: {}  Response: {}", outcome.request, response)
+                DiagResult::Success { detail } => {
+                    format!("{detail}  ({:.0?})", outcome.duration)
                 }
-                radio::DiagnosticResult::Failure { message } => {
-                    format!("Request: {}  Error: {}", outcome.request, message)
-                }
-                radio::DiagnosticResult::Timeout => {
-                    format!("Request: {}  (no response)", outcome.request)
-                }
-                radio::DiagnosticResult::Skipped { reason } => format!("Skipped: {reason}"),
+                DiagResult::Failure { message } => format!("Error: {message}"),
+                DiagResult::Skipped { reason } => format!("Skipped: {reason}"),
             };
             lines.push(Line::from(Span::styled(detail, hint_style)));
         }
@@ -883,7 +956,7 @@ pub(crate) fn draw_diagnostics_panel(
 pub(crate) fn draw_diagnostics_live(
     f: &mut Frame,
     area: Rect,
-    outcomes: &[radio::DiagnosticOutcome],
+    outcomes: &[crate::diagnostics::DiagOutcome],
     total: usize,
 ) {
     let outer_block = Block::default().title(" Controls ").borders(Borders::ALL);

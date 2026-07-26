@@ -2142,7 +2142,6 @@ pub trait Ft991aExtras {
     async fn set_ex_menu_item(&mut self, _p1: u16, _value: i32) -> RadioResult<()> {
         Err(RadioError::NotImplemented)
     }
-
 }
 
 // ---------------------------------------------------------------------------
