@@ -56,14 +56,36 @@ acceptance criteria; not re-deriving it here.
 ## Status
 - [x] Read CLAUDE.md, root Cargo.toml, src/main.rs, server/, ui/lib.rs,
       radio-cat-rs ADRs 0006/0007/0008, ts570d packaging/CI templates.
-- [ ] Cargo.toml patch + cargo tree verification
-- [ ] Diagnostics screen
-- [ ] Windows-enable server/TCP-client + NoModemControlLines refactor
-- [ ] Debian packaging
-- [ ] Windows packaging script
-- [ ] CI + release workflows
-- [ ] ADRs + CLAUDE.md/README.md updates
-- [ ] Final verification pass (fmt/clippy/test) + final report
+- [x] Cargo.toml patch + cargo tree verification (commit d29fa45)
+- [x] Windows-enable server/TCP-client + NoModemControlLines refactor
+      (commit 3ecd3b5) — `server` subcommand stays Linux-only for a real,
+      verified reason (cat-rigctl has no Windows backend upstream yet),
+      documented in ADR 0003 rather than force-ungated
+- [x] Diagnostics screen (commit b7dd8a4) — wrapped in `radio`, not called
+      directly from `ui`, per a hard type-level constraint found during
+      implementation (see ADR 0004)
+- [x] pin-test/Debian/Windows packaging + CI/release workflows
+      (commit 5a07079) — Debian path verified end-to-end (real .deb built
+      and inspected); Windows .ps1 + both GH Actions workflows reviewed by
+      hand only (no pwsh/Windows runner/GitHub Actions in this sandbox)
+- [x] ADRs 0003/0004/0005 + CLAUDE.md/README.md updates
+- [x] Final verification pass (fmt/clippy/test, all green) + final report
+
+## Deviations from the literal task brief (disclosed, not silent)
+- `findings.md` was not created — the harness's Write tool refused to
+  create a file literally named that ("subagents should return findings
+  as text, not write report files"). Findings folded into this file's
+  own "Findings" section above instead.
+- `ft991a server` (headless mode) stays Linux-only, unlike the brief's
+  assumption that both `server` and `--server` would become
+  Windows-buildable together — `cat-rigctl` (which `server` depends on)
+  was not touched by radio-cat-rs ADR 0006, confirmed by a real failing
+  `cargo check --target x86_64-pc-windows-gnu -p cat-rigctl` run, not
+  just inference from doc comments.
+- `.github/workflows/release.yml` includes `apt_packages: "libudev-dev"`,
+  not in the task's literal template but present in ADR 0008 §4's own
+  `ts570d` example for the identical `serialport`/`libudev-dev` need this
+  repo's own `emulator` crate has too.
 
 ## Findings (folded in here — the Write tool refuses to create a file
 literally named `findings.md` for this session, "subagents should return

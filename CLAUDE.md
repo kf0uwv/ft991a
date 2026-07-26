@@ -156,6 +156,11 @@ need the reasoning behind a specific design decision.
 - Emulator: `cargo run -p emulator -- --background` (prints `PTY_SLAVE=<path>`)
 - App against the emulator: `cargo run --bin ft991a -- --port <path> --baud 9600`
 - App against real hardware: `cargo run --bin ft991a -- --port /dev/ttyUSB0 --baud 9600`
+- Headless server mode: `cargo run --bin ft991a -- server --port <path> --raw-tcp-port <n>` (Linux only)
+- Remote TCP client mode: `cargo run --bin ft991a -- --server <host:port>` (Linux and Windows)
+- Debian package: `./packaging/build-deb.sh` (produces `*.deb` in repo root)
+- Windows package: `pwsh ./packaging/build-windows-package.ps1` (produces `*.zip` in repo root; not runnable in a Linux sandbox)
+- `pin-test` (shared RS-232 pin-test tool, from `radio-cat-rs`'s `cat-transport-serial`): `cargo build --release -p cat-transport-serial --bin pin-test`
 
 ## Crate Dependency Model (MANDATORY — ALL AGENTS MUST FOLLOW)
 
@@ -181,7 +186,7 @@ cat-transport-serial  (external crate, from radio-cat-rs — NOT part of this re
       Linux, native Win32 COM-port transport on Windows, same public API on
       both platforms. This repo has NO local `serial` crate.
 
-radio  (depends on: cat-framework, cat-client, cat-transport-core)
+radio  (depends on: cat-framework, cat-client, cat-transport-core, cat-diagnostics)
   └── defines: Ft991aCommandId, FT991A_COMMAND_TABLE (91 commands),
       EX_MENU_TABLE (151 of 153 settings items)
   └── defines: Ft991aRadio (CatRadio impl + emulator state machine), Ft991aState, Ft991aEvent
@@ -189,8 +194,15 @@ radio  (depends on: cat-framework, cat-client, cat-transport-core)
       (~50 FT-991A-specific methods, NotImplemented-defaulted, mirrors
       Radio's idiom), CwKeying trait (RTS/DTR CW keying, bounded on
       + ModemControlLines) + FT-991A domain types
+  └── defines: DiagnosticResult/DiagnosticOutcome/DiagnosticSummary
+      (radio/src/diagnostics.rs) — concrete, non-generic mirrors of
+      cat_diagnostics's own report types, so `ui` never needs to depend
+      on cat-diagnostics itself (see docs/adr/0004)
   └── implements: Radio + Ft991aExtras (unconditional) + CwKeying
       (bounded) for Ft991a<S: CatSession> (controller client)
+  └── Ft991aExtras::run_diagnostics_with wraps
+      cat_diagnostics::run_diagnostics_with — the ONLY place this repo
+      calls into cat-diagnostics; `ui` cannot (see below)
   └── Ft991a is generic over S — never imports a transport crate directly
 
 ui  (depends on: radio only)
@@ -200,6 +212,13 @@ ui  (depends on: radio only)
       ui is contractually FT-991A-shaped, not radio-generic, per the Rust
       coherence constraint recorded in planning/architect/task_plan.md §11.3
   └── uses: radio domain types (Frequency, Mode, ...) for display
+  └── uses: radio::{DiagnosticSummary, DiagnosticOutcome, DiagnosticResult}
+      for the `[D]` diagnostics screen — NEVER cat-diagnostics itself.
+      `ui::run`'s generic `R: Radio + ...` bound has no way to obtain the
+      concrete `CatClient` cat_diagnostics::run_diagnostics_with needs
+      (Ft991a<S>::client is pub(crate)), so this isn't a style choice —
+      `ui` structurally cannot call cat-diagnostics even if it wanted to
+      (see docs/adr/0004)
   └── NEVER imports cat-transport-serial or any other transport crate
 
 emulator  (depends on: cat-framework + radio)
