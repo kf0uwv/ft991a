@@ -24,8 +24,8 @@ the Yaesu FT-991A HF/VHF/UHF transceiver, written in Rust.
   own live TUI, for developing and testing without real hardware.
 - **Linux and Windows** — native io_uring serial I/O on Linux, native Win32
   COM-port I/O on Windows (see [Platform support](#platform-support)).
-- **Headless network server mode** (`ft991a server ...`, Linux only) — one
-  process owns the physical serial port, exposed to WSJT-X (a Hamlib
+- **Headless network server mode** (`ft991a server ...`, Linux and Windows)
+  — one process owns the physical serial port, exposed to WSJT-X (a Hamlib
   rigctld-compatible TCP listener) and/or other `radio-cat-rs`-aware
   clients (raw TCP/UDP) at the same time.
 - **Remote TCP client mode** (`ft991a --server <host:port>`, Linux and
@@ -81,16 +81,20 @@ group, `[E]` for the `EX` settings menu, `[D]` to run the diagnostics
 screen, `[L]` for settings profiles, `[Q]` to quit. Each screen shows its
 own keybindings.
 
-### Headless network server mode (Linux only)
+### Headless network server mode
 
 ```sh
-ft991a server --port /dev/ttyUSB0 --rigctl-port 4532 --raw-tcp-port 7300
+ft991a server --port /dev/ttyUSB0 --rigctl-port 4532 --raw-tcp-port 7300  # Linux
+ft991a.exe server --port COM4 --rigctl-port 4532 --raw-tcp-port 7300      # Windows
 ```
 
 One process owns the physical serial port; `--rigctl-port` exposes a
 Hamlib rigctld-compatible TCP listener (for WSJT-X's "Hamlib NET rigctl"
 rig type), `--raw-tcp-port`/`--raw-udp-port` expose `radio-cat-rs`'s raw
-protocols for other clients. At least one of the three is required.
+protocols for other clients. At least one of the three is required. For a
+full worked example — Windows, COM4, WSJT-X and this project's own TUI
+both connected over the network at once — see
+[`docs/windows-server-wsjtx-tui.md`](docs/windows-server-wsjtx-tui.md).
 
 ### Remote TCP client mode
 
@@ -127,9 +131,10 @@ ui/          Ratatui/crossterm terminal interface. Depends on radio only —
              cat-diagnostics itself (see docs/adr/0004).
 emulator/    PTY-hosted FT-991A simulator with its own TUI, for testing
              without hardware. Linux/Unix-only.
-server/      Headless network server mode (ft991a server ...). Linux only
-             — wraps radio-cat-rs's cat-rigctl, which has no Windows
-             backend yet (see docs/adr/0003).
+server/      Headless network server mode (ft991a server ...). Linux and
+             Windows — wraps radio-cat-rs's cat-rigctl, which gained a
+             Windows backend in that repo's docs/adr/0006 amendment (see
+             this repo's docs/adr/0003 amendment).
 src/         Application wiring — the only place a concrete transport type
              is named, and the platform-specific entry point.
 packaging/   Debian (.deb) and Windows (.zip) packaging scripts, consumed

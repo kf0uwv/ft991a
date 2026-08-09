@@ -18,3 +18,14 @@ curl -L -A "Mozilla/5.0" -o docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf \
 CAT command reference: FT-991A CAT Operation Reference Manual (document
 FT-991A_CAT_OM_ENG_1711-D), all page citations in `radio/`'s source and
 `planning/` files refer to this manual's printed page footers.
+
+## Guides
+
+- [`windows-server-wsjtx-tui.md`](windows-server-wsjtx-tui.md) — run
+  `ft991a server` on Windows against a COM port, then connect both WSJT-X
+  and this project's own TUI to it over the network at the same time.
+
+## Design records
+
+See [`adr/README.md`](adr/README.md) for the architecture decision record
+index.
