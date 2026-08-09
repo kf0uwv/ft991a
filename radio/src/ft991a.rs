@@ -33,16 +33,19 @@
 //! | PTT / TX state  | TX   | `query("TX")` (3-valued)       | `set("TX", "0"/"1")`       |
 //! | S-meter         | SM   | `query_with_param("SM","0")`   | none (read-only)           |
 //! | Power on/off    | PS   | `query("PS")`                  | `set("PS", "0"/"1")`       |
-//! | AF gain         | AG   | `query("AG")`                  | `set("AG", "0<3 digits>")` |
-//! | RF gain         | RG   | `query("RG")`                  | `set("RG", "0<3 digits>")` |
-//! | Squelch         | SQ   | `query("SQ")`                  | `set("SQ", "0<3 digits>")` |
+//! | AF gain         | AG   | `query_with_param("AG","0")`   | `set("AG", "0<3 digits>")` |
+//! | RF gain         | RG   | `query_with_param("RG","0")`   | `set("RG", "0<3 digits>")` |
+//! | Squelch         | SQ   | `query_with_param("SQ","0")`   | `set("SQ", "0<3 digits>")` |
 //! | TX power        | PC   | `query("PC")`                  | `set("PC", "<3 digits>")`  |
 //! | Radio ID        | ID   | `query("ID")`                  | none (read-only)           |
 //!
-//! Note `AG`/`RG`/`SQ` use a **plain** `query()` (zero-width `"AG;"`, not
-//! `query_with_param("AG", "0")`) — see `ft991a_radio.rs`'s module docs for
-//! why these three are NOT "selector reads" despite carrying a selector
-//! byte in their *set* form. Only `MD`/`SM` are genuine selector reads.
+//! `AG`/`RG`/`SQ` are genuine "selector reads", same as `MD`/`SM`: read is
+//! `AG0;` (`query_with_param("AG", "0")`), not the zero-width `AG;` a prior
+//! revision of this file sent. That zero-width form was a manual
+//! mistranscription (see `ft991a_radio.rs`'s module docs for the
+//! correction) that this repo's own emulator happened to also accept,
+//! masking the bug until tested against real hardware, which rejects it
+//! with `"?;"`.
 //!
 //! # Wire formats used (batch 9: meters/status)
 //!
@@ -679,10 +682,11 @@ where
 
     /// Query the AF (audio) gain level (main receiver).
     ///
-    /// Manual p.4: read is `AG;` (zero-width — **not** a selector read,
-    /// unlike `MD`/`SM`), answer `AG0<3 digits>;`, range 000-255.
+    /// Manual p.4: read is `AG0;` (a selector read, same shape as `MD`/`SM`
+    /// — see the module docs' correction note), answer `AG0<3 digits>;`,
+    /// range 000-255.
     pub async fn get_af_gain(&mut self) -> RadioResult<u8> {
-        let raw = self.client.query("AG").await?;
+        let raw = self.client.query_with_param("AG", "0").await?;
         let body = parse_frame(&raw, "AG")?;
         body.get(1..4)
             .and_then(|s| s.parse().ok())
@@ -701,9 +705,10 @@ where
     // RF gain
     // -----------------------------------------------------------------------
 
-    /// Query the RF gain level. Manual p.15: zero-width read, range 000-255.
+    /// Query the RF gain level. Manual p.15: read is `RG0;` (a selector
+    /// read), range 000-255.
     pub async fn get_rf_gain(&mut self) -> RadioResult<u8> {
-        let raw = self.client.query("RG").await?;
+        let raw = self.client.query_with_param("RG", "0").await?;
         let body = parse_frame(&raw, "RG")?;
         body.get(1..4)
             .and_then(|s| s.parse().ok())
@@ -722,10 +727,10 @@ where
     // Squelch
     // -----------------------------------------------------------------------
 
-    /// Query squelch level. Manual p.17: zero-width read, range 000-100
-    /// (**not** 255 — different upper bound from AF/RF gain).
+    /// Query squelch level. Manual p.17: read is `SQ0;` (a selector read),
+    /// range 000-100 (**not** 255 — different upper bound from AF/RF gain).
     pub async fn get_squelch(&mut self) -> RadioResult<u8> {
-        let raw = self.client.query("SQ").await?;
+        let raw = self.client.query_with_param("SQ", "0").await?;
         let body = parse_frame(&raw, "SQ")?;
         body.get(1..4)
             .and_then(|s| s.parse().ok())
@@ -3564,14 +3569,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AG/RG/SQ — corrected (non-selector-read) shape
+    // AG/RG/SQ — selector-read shape (see the module docs' correction note)
     // -----------------------------------------------------------------------
 
     #[monoio::test(driver = "legacy")]
-    async fn test_get_af_gain_sends_zero_width_query_not_selector() {
+    async fn test_get_af_gain_sends_selector_read() {
         let mut radio = make_radio("AG0200;");
         let level = radio.get_af_gain().await.unwrap();
-        assert_eq!(radio.session.borrow().transport.written(), b"AG;");
+        assert_eq!(radio.session.borrow().transport.written(), b"AG0;");
         assert_eq!(level, 200);
     }
 
@@ -3584,10 +3589,26 @@ mod tests {
     }
 
     #[monoio::test(driver = "legacy")]
-    async fn test_get_squelch_sends_zero_width_query() {
+    async fn test_get_rf_gain_sends_selector_read() {
+        let mut radio = make_radio("RG0150;");
+        let level = radio.get_rf_gain().await.unwrap();
+        assert_eq!(radio.session.borrow().transport.written(), b"RG0;");
+        assert_eq!(level, 150);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_set_rf_gain_bakes_in_selector() {
+        let transport = FakeTransport::new();
+        let mut radio = Ft991a::new(SerialCatSession::new(transport));
+        radio.set_rf_gain(150).await.unwrap();
+        assert_eq!(radio.session.borrow().transport.written_str(), "RG0150;");
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn test_get_squelch_sends_selector_read() {
         let mut radio = make_radio("SQ0050;");
         let level = radio.get_squelch().await.unwrap();
-        assert_eq!(radio.session.borrow().transport.written(), b"SQ;");
+        assert_eq!(radio.session.borrow().transport.written(), b"SQ0;");
         assert_eq!(level, 50);
     }
 

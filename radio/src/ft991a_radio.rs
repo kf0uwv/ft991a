@@ -4,9 +4,22 @@
 //! `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf`, re-verified page-by-page
 //! against the manual's own per-command Set/Read/Answer tables (not just the
 //! p.3 master O/X table) — see `planning/yaesu/task_plan.md` for the full
-//! citation list and one confirmed correction to the architect's original
-//! transcription (`AG`/`RG`/`SQ` are plain zero-width-query commands, not
-//! "selector reads" like `MD`/`SM`).
+//! citation list.
+//!
+//! **Correction (post-first-slice, confirmed against real hardware over a
+//! Windows COM port):** `AG`/`RG`/`SQ` **are** "selector reads" like
+//! `MD`/`SM`/`RA`/`RL` — `AG;`/`RG;`/`SQ;` is not a valid wire frame at all.
+//! The first-slice transcription above misread the manual's Read row: the
+//! `P1` column is present (just rendered as the literal placeholder text
+//! `"P1"` rather than a printed `0`), and every occurrence of `P1` across
+//! Set/Read/Answer for these three rows is the same fixed value `0` per the
+//! Set row's own legend — i.e. the real wire form is `AG0;`/`RG0;`/`SQ0;`,
+//! re-confirmed directly against `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf`
+//! p.4/p.15/p.17. A real FT-991A rejects the bare zero-width form with
+//! `"?;"` (this repo's own emulator, built to the same mistaken
+//! transcription, accepted it — which is why this went uncaught until
+//! tested against real hardware). See `planning/yaesu/findings.md` for the
+//! dated correction note.
 //!
 //! # Wire formats used (11 first-slice commands)
 //!
@@ -18,9 +31,9 @@
 //! | TX      | TX   | `TX;` → 0/1/2  | `TX<0/1>;`              | p.17, 3-valued answer |
 //! | S-meter | SM   | `SM0;` (selector read) | none (read-only) | p.17 |
 //! | Power   | PS   | `PS;`          | `PS<0/1>;`              | p.14, wake-sequence quirk (see `Ft991a::set_power_on`'s doc comment) |
-//! | AF gain | AG   | `AG;`          | `AG0<3 digits>;`        | p.4, 000-255 |
-//! | RF gain | RG   | `RG;`          | `RG0<3 digits>;`        | p.15, 000-255 |
-//! | Squelch | SQ   | `SQ;`          | `SQ0<3 digits>;`        | p.17, 000-100 |
+//! | AF gain | AG   | `AG0;` (selector read) | `AG0<3 digits>;` | p.4, 000-255 |
+//! | RF gain | RG   | `RG0;` (selector read) | `RG0<3 digits>;` | p.15, 000-255 |
+//! | Squelch | SQ   | `SQ0;` (selector read) | `SQ0<3 digits>;` | p.17, 000-100 |
 //! | TX power| PC   | `PC;`          | `PC<3 digits>;`         | p.14, 005-100 watts |
 //! | ID      | ID   | `ID;`          | none (read-only)        | p.10, fixed `0670` |
 //!
@@ -1402,6 +1415,27 @@ const SET_2: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 2)];
 const SET_3: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 3)];
 const SET_4: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 4)];
 const SET_9: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 9)];
+/// `AG`'s two Set widths: the selector-only read (`AG0;`, 1 char) and the
+/// write width (`AG0<3-digit P2>;`, 4 chars) — same "selector read" shape as
+/// [`RL_SET_FORMS`]/[`RA_SET_FORMS`] (manual p.4). See the module docs'
+/// AG/RG/SQ correction note for why this isn't the zero-width `QUERY0` this
+/// table used before real-hardware testing found the bug.
+const AG_SET_FORMS: &[CommandForm] = &[
+    CommandForm::selector_read(1),
+    CommandForm::fixed(CommandOperation::Set, 4),
+];
+/// `RG`'s two Set widths — same shape as [`AG_SET_FORMS`] (manual p.15).
+const RG_SET_FORMS: &[CommandForm] = &[
+    CommandForm::selector_read(1),
+    CommandForm::fixed(CommandOperation::Set, 4),
+];
+/// `SQ`'s two Set widths — same total widths as [`AG_SET_FORMS`] (manual
+/// p.17), despite SQ's narrower 000-100 value range (checked in
+/// `handle_command`, not in the wire-width form itself).
+const SQ_SET_FORMS: &[CommandForm] = &[
+    CommandForm::selector_read(1),
+    CommandForm::fixed(CommandOperation::Set, 4),
+];
 /// `MW`'s single Set width: [`ChannelStatusFields::WIRE_WIDTH`] (25 bytes,
 /// P1-P10 — manual p.12, see [`MemoryChannelRecord`]'s doc comment).
 const SET_25: &[CommandForm] = &[CommandForm::fixed(CommandOperation::Set, 25)];
@@ -1712,9 +1746,14 @@ static DEFINITIONS: &[CommandDefinition<Ft991aCommandId>] = &[
     // blank) — readable/writable stated explicitly, not derived.
     definition!(Sm, "SM", "S-Meter Reading", NONE, SET_1, true, false),
     definition!(Ps, "PS", "Power Switch", QUERY0, SET_1),
-    definition!(Ag, "AG", "AF Gain", QUERY0, SET_4),
-    definition!(Rg, "RG", "RF Gain", QUERY0, SET_4),
-    definition!(Sq, "SQ", "Squelch Level", QUERY0, SET_4),
+    // Ag/Rg/Sq are "selector read" shapes like Md/Sm/Ra/Rl above (read is
+    // `<code>0;`, not the zero-width `<code>;` this table used before real-
+    // hardware testing found the bug — see the module docs' correction
+    // note): both capabilities live in set_forms, readable/writable stated
+    // explicitly.
+    definition!(Ag, "AG", "AF Gain", NONE, AG_SET_FORMS, true, true),
+    definition!(Rg, "RG", "RF Gain", NONE, RG_SET_FORMS, true, true),
+    definition!(Sq, "SQ", "Squelch Level", NONE, SQ_SET_FORMS, true, true),
     definition!(Pc, "PC", "Power Control", QUERY0, SET_3),
     definition!(Id, "ID", "Identification", QUERY0, NONE),
     // Batch 9: meters/status.
@@ -6001,11 +6040,11 @@ impl CatRadio for Ft991aRadio {
                 },
                 _ => respond(response, "?;"),
             },
-            Ag => match request.operation {
-                CommandOperation::Query => {
-                    respond(response, &format!("AG0{:03};", self.state.af_gain))
-                }
-                CommandOperation::Set => match parse_selector_level(params, 255) {
+            // Selector-read shape (see the module docs' correction note):
+            // 1-char read carrying a fixed `P1=0`, 4-char write.
+            Ag => match params.len() {
+                1 if params == "0" => respond(response, &format!("AG0{:03};", self.state.af_gain)),
+                4 => match parse_selector_level(params, 255) {
                     Some(level) => {
                         self.state.af_gain = level;
                         events.push(Ft991aEvent {
@@ -6018,11 +6057,9 @@ impl CatRadio for Ft991aRadio {
                 },
                 _ => respond(response, "?;"),
             },
-            Rg => match request.operation {
-                CommandOperation::Query => {
-                    respond(response, &format!("RG0{:03};", self.state.rf_gain))
-                }
-                CommandOperation::Set => match parse_selector_level(params, 255) {
+            Rg => match params.len() {
+                1 if params == "0" => respond(response, &format!("RG0{:03};", self.state.rf_gain)),
+                4 => match parse_selector_level(params, 255) {
                     Some(level) => {
                         self.state.rf_gain = level;
                         events.push(Ft991aEvent {
@@ -6035,11 +6072,9 @@ impl CatRadio for Ft991aRadio {
                 },
                 _ => respond(response, "?;"),
             },
-            Sq => match request.operation {
-                CommandOperation::Query => {
-                    respond(response, &format!("SQ0{:03};", self.state.squelch))
-                }
-                CommandOperation::Set => match parse_selector_level(params, 100) {
+            Sq => match params.len() {
+                1 if params == "0" => respond(response, &format!("SQ0{:03};", self.state.squelch)),
+                4 => match parse_selector_level(params, 100) {
                     Some(level) => {
                         self.state.squelch = level;
                         events.push(Ft991aEvent {
@@ -8344,24 +8379,31 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Corrected (non-selector-read) AG/RG/SQ shape — plain zero-width
-    // query, single 4-char set form.
+    // AG/RG/SQ selector-read shape (`AG0;`, not the zero-width `AG;` this
+    // table used before real-hardware testing found the bug — see the
+    // module docs' correction note), single 4-char set form.
     // -----------------------------------------------------------------
 
     #[test]
-    fn framework_ag_zero_width_query_and_selector_set_round_trip() {
+    fn framework_ag_selector_read_and_selector_set_round_trip() {
         let mut framework = CatFramework::new(Ft991aRadio::new());
         let mut output = Vec::new();
 
-        framework.process_frame("AG;", &mut output).unwrap();
+        framework.process_frame("AG0;", &mut output).unwrap();
         assert_eq!(String::from_utf8(output.clone()).unwrap(), "AG0128;");
 
         output.clear();
         framework.process_frame("AG0200;", &mut output).unwrap();
         assert!(output.is_empty());
 
-        framework.process_frame("AG;", &mut output).unwrap();
+        framework.process_frame("AG0;", &mut output).unwrap();
         assert_eq!(String::from_utf8(output.clone()).unwrap(), "AG0200;");
+
+        // The old, no-longer-valid zero-width query must now be rejected
+        // rather than silently accepted.
+        output.clear();
+        framework.process_frame("AG;", &mut output).unwrap();
+        assert_eq!(String::from_utf8(output.clone()).unwrap(), "?;");
     }
 
     #[test]

@@ -1415,3 +1415,75 @@ every one of the 153 manual menu numbers except 027 ("TIME ZONE") and 087
   re-exported in `lib.rs`, matching how `Radio` already is). Caught
   immediately by the first `cargo build` attempt (E0405), not a silent
   gap.
+
+## 2026-08-08 — CORRECTION: `AG`/`RG`/`SQ` ARE selector reads after all
+
+**Wave 1's "corrected from selector-read to plain query" finding above (the
+one this file's own header table and `ft991a_radio.rs`'s original module
+docs cited) was itself wrong**, and shipped a real protocol bug: real
+FT-991A hardware rejects the bare `AG;`/`RG;`/`SQ;` read this repo sent,
+answering `?;` ("invalid protocol string"). Reported by a user running the
+Windows build against real hardware over a COM port — three of ten status
+fields (`AF gain`, `RF gain`, `Squelch`) showed as poll errors while
+everything else on the same poll cycle succeeded.
+
+Re-read `docs/manuals/FT-991A_CAT_OM_ENG_1711-D.pdf` pp.4/15/17 (printed
+page numbers; PDF page = printed + 1) directly, at the pixel level rather
+than trusting the prior transcription: each command's **Read** row has
+four columns filled in — `<code letter 1>`, `<code letter 2>`, a cell
+literally printed `P1`, `;` — not three. The `P1` cell isn't a stray
+label; it's the same placeholder used throughout this manual for "insert
+this parameter's value here", and each command's own Set-row legend fixes
+`P1 = 0`. So the Read wire form really is `AG0;`/`RG0;`/`SQ0;` — a
+selector read, exactly like `MD`/`SM`/`RA`/`RL`/`CT` already correctly
+implement — not the zero-width `AG;`/`RG;`/`SQ;` Wave 1 shipped. Easy
+mistake to make at a glance (a `P1` placeholder cell reads like "no
+parameter" unless you already know every occupied column in that row is a
+literal character to send), but a mistake nonetheless; there was no
+excuse to skip re-checking it against real hardware once one existed.
+
+**Why this went uncaught for so long**: this repo's own `emulator`
+(`Ft991aRadio::handle_command`) was built from the same mistaken
+transcription, so it happily accepted the bare zero-width query and
+answered correctly — every integration test and manual emulator session
+passed. Only real hardware disagreed. This is exactly the kind of gap
+`docs/adr/0005`'s own disclosed caveat (Windows paths verified by
+type-check and hand-review only, not a real run) predicts, except it
+turned out to be real-hardware-vs-emulator, not Linux-vs-Windows — the
+same bug would have hit a Linux user pointed at real hardware too.
+
+**Fix applied** (not by the yaesu agent role formally, but directly,
+given real-hardware evidence in hand): `radio/src/ft991a_radio.rs`'s
+`Ag`/`Rg`/`Sq` definitions now use new `AG_SET_FORMS`/`RG_SET_FORMS`/
+`SQ_SET_FORMS` consts (`[selector_read(1), fixed(Set, 4)]`, same shape as
+`RA_SET_FORMS`/`RL_SET_FORMS`), dispatched by `params.len()` in
+`handle_command` rather than `request.operation`; `radio/src/ft991a.rs`'s
+`get_af_gain`/`get_rf_gain`/`get_squelch` now call
+`query_with_param("<code>", "0")` instead of a bare `query("<code>")`.
+Using `CommandForm::selector_read` (not a plain `fixed(Set, 1)`, which
+`Sm`'s read-only definition gets away with) matters beyond the direct
+serial path too: `cat-server`'s broker consults `is_selector_read`
+specifically to disambiguate a read-and-await-response path from a
+fire-and-forget write path for commands that are both readable and
+writable (see this repo's own `CLAUDE.md` "`radio-cat-rs` bug found and
+fixed" entry, which is the exact same broker code path) — getting this
+marker wrong would silently drop `ft991a server`'s responses to `AG`/`RG`/
+`SQ` reads, not just fail structurally. Verified: all existing tests
+updated (`radio`'s framework-level and client-level unit tests, plus the
+`ui` mock — none needed changes there since `MockRadio` doesn't model
+wire shape), full workspace `cargo test --workspace` and `cargo test
+--test integration` (the real PTY-hosted emulator round trip) both green,
+`cargo clippy --workspace --all-targets -- -D warnings` and `cargo check
+--target x86_64-pc-windows-gnu -p ft991a` both clean.
+
+**Not re-audited**: this correction covers only `AG`/`RG`/`SQ`, the three
+commands actually reported broken. Several other commands' module-doc
+comments assert "plain zero-width query, not a selector read" on the same
+kind of table-reading judgment call (`MG`, `PL`, `AC`, `OI`, `FT`, `TS`,
+`MX`, `LK`, `AI`, `KS`, `VG`, and others) — each was a separate,
+individually-cited manual read at the time, not a blanket assumption, so
+there's no specific reason to distrust them, but they haven't been
+re-verified against real hardware either. If any of these turn up the
+same `?;` symptom against real hardware, re-check that command's own Read
+row at the pixel level the same way, don't assume it's the same root
+cause without looking.
