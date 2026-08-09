@@ -40,7 +40,7 @@ use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -2767,35 +2767,49 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
         draw_frame(terminal, &display, &control)?;
 
         if event::poll(EVENT_POLL_TIMEOUT).map_err(UiError::Io)? {
+            // Unix terminals only ever report key-down as `Event::Key`, so
+            // this loop was never exercised against anything else — but
+            // Windows' native console backend reports key-up too (crossterm
+            // surfaces it as the same `Event::Key` variant with `kind ==
+            // KeyEventKind::Release`), which without this filter fired
+            // `handle_key` twice per keystroke (once on press, once on
+            // release), duplicating every input. `KeyEventKind::Press` is
+            // the only kind that should ever trigger an action; `Repeat`
+            // (held-key autorepeat) is deliberately excluded too, since
+            // this UI already advances via its own event-poll loop rather
+            // than relying on OS key-repeat.
             if let Event::Key(key) = event::read().map_err(UiError::Io)? {
-                match handle_key(key, &mut control, &display) {
-                    KeyResult::Quit => break,
-                    KeyResult::Continue => {}
-                    KeyResult::RunDiagnostics(cw_callsign) => {
-                        control =
-                            run_diagnostics_screen(radio, terminal, &display, cw_callsign).await;
-                    }
-                    KeyResult::Execute(action) => {
-                        let (desc, result) = execute_action(radio, action, &mut display).await;
-                        control = match result {
-                            // Empty extra text -> plain "OK: {desc}"; the
-                            // read-type actions (§ execute_action doc
-                            // comment) return their fetched value here
-                            // instead, which takes priority when present —
-                            // mirrors `ts570d::ui`'s own convention.
-                            Ok(msg) if msg.is_empty() => ControlState::Feedback {
-                                message: format!("OK: {}", desc),
-                                is_error: false,
-                            },
-                            Ok(msg) => ControlState::Feedback {
-                                message: msg,
-                                is_error: false,
-                            },
-                            Err(e) => ControlState::Feedback {
-                                message: format!("Error: {}", e),
-                                is_error: true,
-                            },
-                        };
+                if key.kind == KeyEventKind::Press {
+                    match handle_key(key, &mut control, &display) {
+                        KeyResult::Quit => break,
+                        KeyResult::Continue => {}
+                        KeyResult::RunDiagnostics(cw_callsign) => {
+                            control =
+                                run_diagnostics_screen(radio, terminal, &display, cw_callsign)
+                                    .await;
+                        }
+                        KeyResult::Execute(action) => {
+                            let (desc, result) = execute_action(radio, action, &mut display).await;
+                            control = match result {
+                                // Empty extra text -> plain "OK: {desc}"; the
+                                // read-type actions (§ execute_action doc
+                                // comment) return their fetched value here
+                                // instead, which takes priority when present —
+                                // mirrors `ts570d::ui`'s own convention.
+                                Ok(msg) if msg.is_empty() => ControlState::Feedback {
+                                    message: format!("OK: {}", desc),
+                                    is_error: false,
+                                },
+                                Ok(msg) => ControlState::Feedback {
+                                    message: msg,
+                                    is_error: false,
+                                },
+                                Err(e) => ControlState::Feedback {
+                                    message: format!("Error: {}", e),
+                                    is_error: true,
+                                },
+                            };
+                        }
                     }
                 }
             }
