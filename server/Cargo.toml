@@ -43,6 +43,17 @@ async-trait = { workspace = true }
 [features]
 default = []
 
+[dev-dependencies]
+# Runtime-agnostic test executor. `rigctl_radio`'s tests are pure
+# delegation checks against a ScriptedCatSession -- no io_uring -- and had
+# been using `#[monoio::test]` as nothing but a `block_on`, which broke the
+# whole Windows test target because `monoio` is Linux-only. Same defect and
+# same fix as `radio-cat-rs` (its planning/release_workflow/findings.md
+# section 7a). `lib.rs`'s test module is different: it genuinely exercises
+# the Linux `async fn run`, and stays `#[cfg(all(test, target_os =
+# "linux"))]`.
+futures = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Async runtime (io_uring-based, Linux-only) — named directly for
 # `#[monoio::test]` in this crate's own unit tests, which only exercise the

@@ -49,6 +49,13 @@
 //! iterating `EX_MENU_TABLE` rather than 151 hand-written functions —
 //! ft991a's EX menu has no ts570d equivalent to mirror the style of.
 
+//! Linux-only: exercises the io_uring serial driver directly (`monoio`,
+//! target-gated to Linux) against a PTY-backed emulator (pseudo-terminals
+//! are a Unix concept). Mirrors `ts570d/tests/integration.rs`'s own gate.
+//! A Windows port of this suite would need a Windows-side fake/loopback
+//! transport, which no ADR has scoped.
+#![cfg(target_os = "linux")]
+
 use std::time::Duration;
 
 use cat_transport_serial::{SerialCatSession, SerialConfig, SerialPort};

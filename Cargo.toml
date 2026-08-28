@@ -135,7 +135,6 @@ ui = { path = "ui" }
 server = { path = "server" }
 
 [dev-dependencies]
-emulator = { path = "emulator" }
 radio = { path = "radio" }
 cat-transport-serial = { workspace = true }
 
@@ -163,6 +162,19 @@ monoio = { workspace = true }
 # Test-only monoio usage (#[monoio::main]-driven smoke tests, if any land
 # here later) — same Linux-only gating as the runtime dependency above.
 monoio = { workspace = true }
+# The emulator is fundamentally Unix-only (pseudo-terminals via
+# serialport::TTYPort, std::os::unix::io::AsRawFd), so it is not part of
+# this repo's Windows support at all. Only tests/integration.rs uses it,
+# and that file is itself Linux-gated.
+#
+# This was an UNCONDITIONAL dev-dependency until 2026-08-27. It went
+# unnoticed because the old Windows CI job ran `cargo check -p ft991a`,
+# which builds no dev-dependencies; widening the job to `cargo test
+# --workspace` broke it immediately. Note that `--exclude emulator` does
+# NOT help here -- that drops it as a tested *package*, not as a
+# dependency of this one. `ts570d` has always had this gating; this repo
+# was the outlier.
+emulator = { path = "emulator" }
 
 # Metadata for documentation and packaging
 [package.metadata.docs.rs]

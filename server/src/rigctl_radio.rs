@@ -181,41 +181,52 @@ mod tests {
         assert_eq!(max, Frequency::MAX_HZ);
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn set_mode_delegates_to_set_mode() {
-        let session = ScriptedCatSession::with_script(vec![Exchange::new("MD01;", "")]);
-        let mut radio = wrap(session);
-        RigctlRadio::set_mode(&mut radio, Mode::Lsb).await.unwrap();
+    #[test]
+    fn set_mode_delegates_to_set_mode() {
+        futures::executor::block_on(async {
+            let session = ScriptedCatSession::with_script(vec![Exchange::new("MD01;", "")]);
+            let mut radio = wrap(session);
+            RigctlRadio::set_mode(&mut radio, Mode::Lsb).await.unwrap();
+        });
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn get_vfo_a_hz_delegates_to_get_vfo_a() {
-        let session = ScriptedCatSession::with_script(vec![Exchange::new("FA;", "FA014250000;")]);
-        let mut radio = wrap(session);
-        let hz = RigctlRadio::get_vfo_a_hz(&mut radio).await.unwrap();
-        assert_eq!(hz, 14_250_000);
+    #[test]
+    fn get_vfo_a_hz_delegates_to_get_vfo_a() {
+        futures::executor::block_on(async {
+            let session =
+                ScriptedCatSession::with_script(vec![Exchange::new("FA;", "FA014250000;")]);
+            let mut radio = wrap(session);
+            let hz = RigctlRadio::get_vfo_a_hz(&mut radio).await.unwrap();
+            assert_eq!(hz, 14_250_000);
+        });
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn set_vfo_a_hz_delegates_to_set_vfo_a() {
-        let session = ScriptedCatSession::with_script(vec![Exchange::new("FA014250000;", "")]);
-        let mut radio = wrap(session);
-        RigctlRadio::set_vfo_a_hz(&mut radio, 14_250_000)
-            .await
-            .unwrap();
+    #[test]
+    fn set_vfo_a_hz_delegates_to_set_vfo_a() {
+        futures::executor::block_on(async {
+            let session = ScriptedCatSession::with_script(vec![Exchange::new("FA014250000;", "")]);
+            let mut radio = wrap(session);
+            RigctlRadio::set_vfo_a_hz(&mut radio, 14_250_000)
+                .await
+                .unwrap();
+        });
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn get_transmitting_maps_tx_state_off_to_false() {
-        let session = ScriptedCatSession::with_script(vec![Exchange::new("TX;", "TX0;")]);
-        let mut radio = wrap(session);
-        assert!(!RigctlRadio::get_transmitting(&mut radio).await.unwrap());
+    #[test]
+    fn get_transmitting_maps_tx_state_off_to_false() {
+        futures::executor::block_on(async {
+            let session = ScriptedCatSession::with_script(vec![Exchange::new("TX;", "TX0;")]);
+            let mut radio = wrap(session);
+            assert!(!RigctlRadio::get_transmitting(&mut radio).await.unwrap());
+        });
     }
 
-    #[monoio::test(driver = "legacy")]
-    async fn get_transmitting_maps_tx_state_on_to_true() {
-        let session = ScriptedCatSession::with_script(vec![Exchange::new("TX;", "TX1;")]);
-        let mut radio = wrap(session);
-        assert!(RigctlRadio::get_transmitting(&mut radio).await.unwrap());
+    #[test]
+    fn get_transmitting_maps_tx_state_on_to_true() {
+        futures::executor::block_on(async {
+            let session = ScriptedCatSession::with_script(vec![Exchange::new("TX;", "TX1;")]);
+            let mut radio = wrap(session);
+            assert!(RigctlRadio::get_transmitting(&mut radio).await.unwrap());
+        });
     }
 }
