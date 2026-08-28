@@ -165,8 +165,9 @@ executor on Windows, since `monoio` requires io_uring and doesn't build
 there at all). Cross-compile with:
 
 ```sh
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu -p ft991a
+cargo install cargo-xwin --locked
+rustup target add x86_64-pc-windows-msvc
+cargo xwin build --release --target x86_64-pc-windows-msvc -p ft991a
 ```
 
 There is no Windows build of the emulator — validate a Windows build

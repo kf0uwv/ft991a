@@ -55,9 +55,31 @@ jobs:
         run: cargo test --test integration
 
   windows-check:
-    name: Windows cross-check
-    runs-on: ubuntu-latest
+    name: Windows (MSVC)
+    runs-on: windows-latest
 
+    # Authoritative Windows verification, per `radio-cat-rs` ADR 0012.
+    #
+    # Supersedes the previous `cargo check --target x86_64-pc-windows-gnu
+    # -p ft991a` cross-check on an Ubuntu runner, which differed from this
+    # job in three ways, all of them now fixed:
+    #
+    #   1. It targeted `-gnu`, which is not what the release workflow
+    #      packages. `x86_64-pc-windows-msvc` is the host target on
+    #      `windows-latest`, so no `--target` flag is needed or wanted.
+    #   2. It type-checked only. This builds and runs the test suite.
+    #   3. It was scoped to `-p ft991a` on the grounds that `server` was
+    #      "genuinely not Windows-buildable yet" because `cat-rigctl` had
+    #      no Windows backend. That justification went stale on 2026-07-26,
+    #      when `cat-rigctl` gained one (see this repo's Cargo.toml comment
+    #      on the `server` dependency, and `radio-cat-rs` ADR 0006's
+    #      amendment). The scope is now the whole workspace.
+    #
+    # `emulator` is excluded: its virtual-TTY PTY hosting is Unix-only by
+    # design, not by toolchain.
+    #
+    # These tests have never executed on Windows before. Failures are
+    # pre-existing bugs, not regressions from this migration.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,7 +88,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
-          targets: x86_64-pc-windows-gnu
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -76,18 +97,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-windows-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-windows-
+            ${{ runner.os }}-cargo-windows-msvc-
             ${{ runner.os }}-cargo-
 
-      - name: Windows cross-check (type-check only)
-        # Mirrors CLAUDE.md's documented command exactly. `server` is
-        # deliberately NOT included here -- it is genuinely not
-        # Windows-buildable yet (its cat-rigctl dependency has no Windows
-        # backend upstream in radio-cat-rs -- see
-        # docs/adr/0003-consume-radio-cat-rs-windows-network-transport.md)
-        # and the root Cargo.toml only pulls it in for the `ft991a` binary
-        # under `cfg(target_os = "linux")`, so this command never touches
-        # it anyway.
-        run: cargo check --target x86_64-pc-windows-gnu -p ft991a
+      - name: cargo check (workspace, excluding emulator)
+        run: cargo check --workspace --exclude emulator
+
+      - name: cargo test (workspace, excluding emulator)
+        run: cargo test --workspace --exclude emulator

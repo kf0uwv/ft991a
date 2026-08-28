@@ -14,7 +14,8 @@
 - `emulator` is a PTY-hosted FT-991A protocol simulator, verified
   interoperating end-to-end with the real `ft991a` binary over a live PTY.
 - This application cross-compiles cleanly for Windows
-  (`cargo check --target x86_64-pc-windows-gnu -p ft991a`), riding on
+  (`cargo xwin check --target x86_64-pc-windows-msvc --workspace --exclude emulator`;
+  `-msvc` is the only Windows target per `radio-cat-rs` ADR 0012), riding on
   `radio-cat-rs`'s native Win32 COM serial backend and a hand-rolled
   Windows entry point (`#[monoio::main]` doesn't exist there).
 - `radio::Profile` (`--profile <name>` CLI flag, `[L]` in-UI menu action)
@@ -170,8 +171,10 @@ need the reasoning behind a specific design decision.
 - Build: `cargo build --workspace` / `cargo build --workspace --release`
 - Test: `cargo test --workspace` / `cargo test -p <crate> test_name`
 - Lint: `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt`
-- Windows cross-compile check: `cargo check --target x86_64-pc-windows-gnu -p ft991a`
-  (requires `rustup target add x86_64-pc-windows-gnu`; type-checks only)
+- Windows check (local, best-effort): `cargo xwin check --target x86_64-pc-windows-msvc --workspace --exclude emulator`
+  (one-time `cargo install cargo-xwin --locked` + `rustup target add x86_64-pc-windows-msvc`).
+  Cannot run tests — CI's `windows-latest` job is authoritative and runs
+  `cargo check` **and** `cargo test` over the same scope.
 - Emulator: `cargo run -p emulator -- --background` (prints `PTY_SLAVE=<path>`)
 - App against the emulator: `cargo run --bin ft991a -- --port <path> --baud 9600`
 - App against real hardware: `cargo run --bin ft991a -- --port /dev/ttyUSB0 --baud 9600`
@@ -226,6 +229,28 @@ ui  (depends on: radio only)
       this is a disclosed, real widening from "any Radio implementation":
       ui is contractually FT-991A-shaped, not radio-generic, per the Rust
       coherence constraint recorded in planning/architect/task_plan.md §11.3
+      NOTE (2026-08-27, ACCEPTED): `radio-cat-rs` ADRs 0010, 0011, 0012
+      and 0013 are Accepted. On migration they replace this "contractually
+      FT-991A-shaped, not radio-generic" framing with "radio-specific in
+      layout and features, delegating protocol, capability discovery and
+      base widgets to the library". **The migration has not been written,
+      so this rule still describes and governs the current code** — but no
+      new code may entrench the superseded framing.
+      ADR 0010 also resolves this repo's own ADR 0002 deferred USB
+      dual-port question via an endpoint-role model (Cat and Keying on
+      separate CP210x ports, plus a USB Audio codec — this repo is the
+      stressing fixture for that model, task_plan.md Task 13), and deletes
+      `server/src/rigctl_radio.rs` in favour of a `cat-rigctl` implemented
+      once over `RadioCapabilities`.
+      ADR 0011 rev 4 additionally migrates this `ui` crate onto shared
+      `cat-ui` + `cat-ui-ratatui` widgets, keeping its layout and feature
+      set exactly as it stands — the acceptance bar is that the operator
+      sees no change. ADR 0013 makes the TUI permanent and requires
+      capability parity with any future GUI, with exceptions recorded in
+      `docs/renderer-parity.md`.
+      ADR 0012 retires `x86_64-pc-windows-gnu`: Windows means
+      `x86_64-pc-windows-msvc`, verified by `cargo check` **and
+      `cargo test`** on a `windows-latest` runner.
   └── uses: radio domain types (Frequency, Mode, ...) for display
   └── defines: DiagOutcome/DiagResult/DiagSummary (ui/src/diagnostics.rs)
       and the full hand-coded diagnostics engine
@@ -315,9 +340,10 @@ trait methods, not on `Radio`.
   `cat_framework::CatFramework<Ft991aRadio>` directly, in-process — no PTY
   needed for command-table/state-machine coverage, mirroring `ts570d`)
 - Integration tests with the PTY-hosted `emulator` crate (Linux/Unix only)
-- Windows: `cargo check --target x86_64-pc-windows-gnu` type-checks the
-  build; there is no Windows-compatible emulator, so runtime behavior is
-  validated against real hardware, not in this repo's own test suite
+- Windows: the `windows-latest` CI job runs `cargo check` **and
+  `cargo test`** against `x86_64-pc-windows-msvc`; there is no
+  Windows-compatible emulator, so hardware-dependent runtime behavior is
+  still validated against real hardware, not in this repo's own test suite
 
 ## Linux-Specific
 - io_uring kernel requirements (5.1+) — provided by `cat-transport-serial`,
