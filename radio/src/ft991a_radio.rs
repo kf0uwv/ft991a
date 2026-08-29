@@ -8699,7 +8699,7 @@ mod tests {
         ] {
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("RI{selector};"), &mut output)
+                .process_frame(format!("RI{selector};"), &mut output)
                 .unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), expected);
         }
@@ -8712,7 +8712,7 @@ mod tests {
         for selector in ["1", "2", "8", "9", "B", "F"] {
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("RI{selector};"), &mut output)
+                .process_frame(format!("RI{selector};"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -8776,7 +8776,7 @@ mod tests {
         ] {
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("RM{selector};"), &mut output)
+                .process_frame(format!("RM{selector};"), &mut output)
                 .unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), expected);
         }
@@ -8889,7 +8889,7 @@ mod tests {
         for value in ["0", "1", "2", "3"] {
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("EX060{value};"), &mut output)
+                .process_frame(format!("EX060{value};"), &mut output)
                 .unwrap();
             assert!(output.is_empty(), "write should produce no response");
 
@@ -8933,13 +8933,13 @@ mod tests {
             for value in *valid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert!(output.is_empty(), "EX{p1:03}{value}; should write silently");
 
                 output.clear();
                 framework
-                    .process_frame(&format!("EX{p1:03};"), &mut output)
+                    .process_frame(format!("EX{p1:03};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -8951,7 +8951,7 @@ mod tests {
             for value in *invalid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9168,13 +9168,13 @@ mod tests {
             for value in *valid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert!(output.is_empty(), "EX{p1:03}{value}; should write silently");
 
                 output.clear();
                 framework
-                    .process_frame(&format!("EX{p1:03};"), &mut output)
+                    .process_frame(format!("EX{p1:03};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9186,7 +9186,7 @@ mod tests {
             for value in *invalid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9208,13 +9208,13 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("EX{p1:03}-00;"), &mut output)
+                .process_frame(format!("EX{p1:03}-00;"), &mut output)
                 .unwrap();
             assert!(output.is_empty(), "EX{p1:03}-00; should write silently");
 
             output.clear();
             framework
-                .process_frame(&format!("EX{p1:03};"), &mut output)
+                .process_frame(format!("EX{p1:03};"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -9364,13 +9364,13 @@ mod tests {
             for value in *valid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert!(output.is_empty(), "EX{p1:03}{value}; should write silently");
 
                 output.clear();
                 framework
-                    .process_frame(&format!("EX{p1:03};"), &mut output)
+                    .process_frame(format!("EX{p1:03};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9382,7 +9382,7 @@ mod tests {
             for value in *invalid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9401,13 +9401,13 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("EX{p1:03}-0000;"), &mut output)
+                .process_frame(format!("EX{p1:03}-0000;"), &mut output)
                 .unwrap();
             assert!(output.is_empty(), "EX{p1:03}-0000; should write silently");
 
             output.clear();
             framework
-                .process_frame(&format!("EX{p1:03};"), &mut output)
+                .process_frame(format!("EX{p1:03};"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -9691,13 +9691,13 @@ mod tests {
             for value in *valid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert!(output.is_empty(), "EX{p1:03}{value}; should write silently");
 
                 output.clear();
                 framework
-                    .process_frame(&format!("EX{p1:03};"), &mut output)
+                    .process_frame(format!("EX{p1:03};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9709,7 +9709,7 @@ mod tests {
             for value in *invalid {
                 let mut output = Vec::new();
                 framework
-                    .process_frame(&format!("EX{p1:03}{value};"), &mut output)
+                    .process_frame(format!("EX{p1:03}{value};"), &mut output)
                     .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
@@ -9728,13 +9728,13 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("EX{p1:03}-00;"), &mut output)
+                .process_frame(format!("EX{p1:03}-00;"), &mut output)
                 .unwrap();
             assert!(output.is_empty(), "EX{p1:03}-00; should write silently");
 
             output.clear();
             framework
-                .process_frame(&format!("EX{p1:03};"), &mut output)
+                .process_frame(format!("EX{p1:03};"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -9763,7 +9763,7 @@ mod tests {
         for value in ["0", "1", "2", "3"] {
             output.clear();
             framework
-                .process_frame(&format!("EX100{value};"), &mut output)
+                .process_frame(format!("EX100{value};"), &mut output)
                 .unwrap();
             assert!(output.is_empty());
         }
@@ -9784,7 +9784,7 @@ mod tests {
         for value in ["00", "01", "02"] {
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("EX116{value};"), &mut output)
+                .process_frame(format!("EX116{value};"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -9950,7 +9950,7 @@ mod tests {
         // at all (MR's only set_forms width is 3) — the framework itself
         // rejects it as an unsupported parameter width.
         framework
-            .process_frame(&format!("MR{};", default_channel1_body()), &mut output)
+            .process_frame(format!("MR{};", default_channel1_body()), &mut output)
             .unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "?;");
     }
@@ -9972,10 +9972,7 @@ mod tests {
             offset_type: 1,
         };
         framework
-            .process_frame(
-                &format!("MW{};", write_fields.to_wire_string()),
-                &mut output,
-            )
+            .process_frame(format!("MW{};", write_fields.to_wire_string()), &mut output)
             .unwrap();
         assert!(output.is_empty(), "MW has no answer (manual p.3: Ans=X)");
 
@@ -10020,7 +10017,7 @@ mod tests {
             offset_type: 0,
         };
         framework
-            .process_frame(&format!("MW{};", base.to_wire_string()), &mut output)
+            .process_frame(format!("MW{};", base.to_wire_string()), &mut output)
             .unwrap();
         assert_eq!(String::from_utf8(output.clone()).unwrap(), "?;");
 
@@ -10032,7 +10029,7 @@ mod tests {
             ..base
         };
         framework
-            .process_frame(&format!("MW{};", bad_select.to_wire_string()), &mut output)
+            .process_frame(format!("MW{};", bad_select.to_wire_string()), &mut output)
             .unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "?;");
     }
@@ -10057,7 +10054,7 @@ mod tests {
         let write_body = format!("{}0{:<12}", fields.to_wire_string(), tag);
         assert_eq!(write_body.len(), 38);
         framework
-            .process_frame(&format!("MT{write_body};"), &mut output)
+            .process_frame(format!("MT{write_body};"), &mut output)
             .unwrap();
         assert!(output.is_empty(), "MT write has no answer");
 
@@ -10094,7 +10091,7 @@ mod tests {
         // slot is still 12 bytes wide, all spaces).
         framework
             .process_frame(
-                &format!("MT{}0{:<12};", base.to_wire_string(), ""),
+                format!("MT{}0{:<12};", base.to_wire_string(), ""),
                 &mut output,
             )
             .unwrap();
@@ -10114,7 +10111,7 @@ mod tests {
         assert_eq!(full_tag.len(), 12);
         framework
             .process_frame(
-                &format!("MT{}0{full_tag};", base.to_wire_string()),
+                format!("MT{}0{full_tag};", base.to_wire_string()),
                 &mut output,
             )
             .unwrap();
@@ -10150,7 +10147,7 @@ mod tests {
         assert_eq!(bad_tag.len(), 12);
         framework
             .process_frame(
-                &format!("MT{}0{bad_tag};", fields.to_wire_string()),
+                format!("MT{}0{bad_tag};", fields.to_wire_string()),
                 &mut output,
             )
             .unwrap();
@@ -10201,7 +10198,7 @@ mod tests {
         };
         framework
             .process_frame(
-                &format!("MT{}0{:<12};", fields.to_wire_string(), ""),
+                format!("MT{}0{:<12};", fields.to_wire_string(), ""),
                 &mut output,
             )
             .unwrap();
@@ -10327,7 +10324,7 @@ mod tests {
             offset_type: 0,
         };
         framework
-            .process_frame(&format!("MW{};", fields.to_wire_string()), &mut output)
+            .process_frame(format!("MW{};", fields.to_wire_string()), &mut output)
             .unwrap();
         framework.process_frame("MC010;", &mut output).unwrap();
         output.clear();
@@ -10520,7 +10517,7 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("{code}1;"), &mut output)
+                .process_frame(format!("{code}1;"), &mut output)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
@@ -10596,7 +10593,7 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("{code}2;"), &mut output)
+                .process_frame(format!("{code}2;"), &mut output)
                 .unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), "?;");
         }
@@ -10702,7 +10699,7 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("{code}12ab;"), &mut output)
+                .process_frame(format!("{code}12ab;"), &mut output)
                 .unwrap();
             assert_eq!(String::from_utf8(output).unwrap(), "?;");
         }
@@ -10722,7 +10719,7 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             framework
-                .process_frame(&format!("CT0{value};"), &mut output)
+                .process_frame(format!("CT0{value};"), &mut output)
                 .unwrap();
             assert!(output.is_empty());
 
@@ -11024,7 +11021,7 @@ mod tests {
         let mut framework = CatFramework::new(Ft991aRadio::new());
         let mut output = Vec::new();
         framework
-            .process_frame(&format!("KM5{long_message};"), &mut output)
+            .process_frame(format!("KM5{long_message};"), &mut output)
             .unwrap();
         assert!(output.is_empty());
 
@@ -11042,7 +11039,7 @@ mod tests {
         let mut framework = CatFramework::new(Ft991aRadio::new());
         let mut output = Vec::new();
         framework
-            .process_frame(&format!("KM2{message};"), &mut output)
+            .process_frame(format!("KM2{message};"), &mut output)
             .unwrap();
         assert!(output.is_empty());
 
@@ -11174,7 +11171,7 @@ mod tests {
             let mut framework = CatFramework::new(Ft991aRadio::new());
             let mut output = Vec::new();
             let outcome = framework
-                .process_frame(&format!("KY{code};"), &mut output)
+                .process_frame(format!("KY{code};"), &mut output)
                 .unwrap();
             assert!(output.is_empty(), "KY{code} has no answer");
             assert_eq!(outcome.events.len(), 1, "KY{code} pushes exactly one event");
@@ -11357,7 +11354,7 @@ mod tests {
         for value in ["1", "2", "0"] {
             output.clear();
             framework
-                .process_frame(&format!("SC{value};"), &mut output)
+                .process_frame(format!("SC{value};"), &mut output)
                 .unwrap();
             assert!(output.is_empty());
 
@@ -11524,7 +11521,7 @@ mod tests {
         for v in 0..=2u8 {
             output.clear();
             framework
-                .process_frame(&format!("PA0{v};"), &mut output)
+                .process_frame(format!("PA0{v};"), &mut output)
                 .unwrap();
             assert!(output.is_empty());
 
@@ -11616,7 +11613,7 @@ mod tests {
         for v in 0..=3u8 {
             output.clear();
             framework
-                .process_frame(&format!("GT0{v};"), &mut output)
+                .process_frame(format!("GT0{v};"), &mut output)
                 .unwrap();
             assert!(output.is_empty());
             output.clear();
