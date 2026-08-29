@@ -70,20 +70,20 @@ mockall = "0.12.1"
 # app's build is reproducible against a known-good, released snapshot of
 # the shared library instead of whatever happens to be on that repo's main
 # branch at build time.
-cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
-cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
-cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
-cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 # Server mode only (Wave 5, `server` crate) — the request broker + raw
 # TCP/UDP listeners.
-cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
-cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
-cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 # Generic Hamlib rigctld-compatible TCP bridge + network-server
 # orchestration (`server` crate), radio-independent behind the
 # `RigctlRadio` trait. Replaces this app's previously hand-rolled
 # `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
-cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.1.0" }
+cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 
 [package]
 name = "ft991a"
