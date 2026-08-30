@@ -135,8 +135,37 @@ where
         }
     }
 
+    /// Read out of [`radio::capabilities::FT991A`] rather than restated,
+    /// so there is one declaration of this radio's coverage and not two.
+    ///
+    /// `cat_rigctl` only consults this on the placeholder path, which
+    /// [`Self::capabilities`] takes us off. Keeping it correct anyway
+    /// costs nothing, and a silently-wrong fallback would be nasty.
     fn freq_range_hz() -> (u64, u64) {
-        (Frequency::MIN_HZ, Frequency::MAX_HZ)
+        let range = radio::capabilities::FT991A.rx_range;
+        (range.min_hz, range.max_hz)
+    }
+
+    /// Publish what this radio is, so `\dump_state`'s capability tail is
+    /// **generated** rather than a placeholder.
+    ///
+    /// Until now every Hamlib client was told the same invented story: a
+    /// single 10 Hz tuning step, one 2400 Hz filter, and RIT/XIT limits of
+    /// 1200 Hz. This radio has eight tuning steps, thirty-four selectable
+    /// filter widths and +/-9999 Hz of clarifier, and it covers 30 kHz to
+    /// 470 MHz rather than the 1.8-30 MHz a client might reasonably assume
+    /// of something answering a Kenwood-shaped protocol.
+    ///
+    /// This is a deliberate behaviour change to a compatibility layer, and
+    /// it fails in the nastiest way available: a `\dump_state` reply
+    /// Hamlib disagrees with about length makes `netrigctl_open()` block
+    /// forever rather than fail, and nothing in the symptom points at the
+    /// cause (radio-cat-rs ADR 0005). So it is verified against a real
+    /// client in `tests/hamlib_interop.rs` rather than reasoned about --
+    /// this radio's tail is far longer than any fixture upstream tests
+    /// with, and length is precisely what that bug was about.
+    fn capabilities() -> Option<&'static cat_framework::capabilities::RadioCapabilities> {
+        Some(&radio::capabilities::FT991A)
     }
 }
 
@@ -172,6 +201,30 @@ mod tests {
                 "mode {mode:?} -> {name} did not round-trip"
             );
         }
+    }
+
+    #[test]
+    fn the_bridge_publishes_this_radios_capabilities() {
+        // Compared by value, not by address: `FT991A` is a `const`, so
+        // each `&FT991A` is a separately promoted temporary and pointer
+        // identity is not a property it has.
+        let caps = <Ft991aRigctl<ScriptedCatSession> as RigctlRadio>::capabilities()
+            .expect("the bridge must publish capabilities, not a placeholder");
+        assert_eq!(*caps, radio::capabilities::FT991A);
+    }
+
+    #[test]
+    fn the_generated_dump_state_will_not_be_structurally_empty() {
+        // `dump_state` generation lives upstream and is tested there, but
+        // it is only as good as what this radio hands it. These are the
+        // lists Hamlib reads to a sentinel: were either empty, the reply
+        // would fall back to a filler row and quietly stop describing the
+        // radio.
+        let caps = &radio::capabilities::FT991A;
+        assert!(!caps.tuning_steps_hz.is_empty());
+        assert!(caps.filters.widths_hz.is_some_and(|w| !w.is_empty()));
+        assert!(caps.vfos.rit_hz.is_some());
+        assert!(caps.rx_range.min_hz < caps.rx_range.max_hz);
     }
 
     #[test]

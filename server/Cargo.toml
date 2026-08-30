@@ -36,6 +36,11 @@ cat-transport-core = { workspace = true }
 # doc comment for why a wrapper is needed) and a thin `run()` wrapper.
 cat-rigctl = { workspace = true }
 
+# For `RigctlRadio::capabilities`, which hands `cat-rigctl` this radio's
+# own description so `\dump_state`'s tail is generated rather than
+# invented (radio-cat-rs ADR 0010 section 6).
+cat-framework = { workspace = true }
+
 # Async traits (compatible with !Send futures for monoio) — `Ft991aRigctl`'s
 # `impl RigctlRadio` is `#[async_trait(?Send)]`.
 async-trait = { workspace = true }

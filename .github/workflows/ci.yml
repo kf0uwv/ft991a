@@ -38,7 +38,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        # libhamlib-utils provides `rigctl`, the real client the rigctld
+        # bridge is verified against. Both of radio-cat-rs ADR 0005's
+        # interop bugs passed every unit test while failing against it.
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libhamlib-utils
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -53,6 +56,21 @@ jobs:
         # Requires /dev/pts (ptmx) and io_uring (kernel 5.1+).
         # ubuntu-latest runs kernel 6.x so both are available.
         run: cargo test --test integration
+
+      - name: Live Hamlib interop
+        # Not covered by `--lib`, and deliberately its own step: these
+        # drive a real `rigctl` against this radio's own capability set,
+        # whose `\dump_state` tail is far longer than any fixture upstream
+        # tests with.
+        #
+        # EXPECT_HAMLIB turns their skip into a failure. Without it a
+        # missing `rigctl` would make them pass silently, which is worse
+        # than not having them -- and it is deliberately not the generic
+        # `CI` variable, which is also set on the Windows runner where
+        # this file does not compile at all.
+        env:
+          EXPECT_HAMLIB: "1"
+        run: cargo test -p server --test hamlib_interop
 
   windows-check:
     name: Windows (MSVC)
