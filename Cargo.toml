@@ -71,6 +71,8 @@ mockall = "0.12.1"
 # the shared library instead of whatever happens to be on that repo's main
 # branch at build time.
 cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
 cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
