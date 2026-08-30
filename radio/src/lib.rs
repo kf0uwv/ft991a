@@ -118,6 +118,7 @@
 //! assert!(fa.is_writable());
 //! ```
 
+pub mod capabilities;
 pub mod ft991a;
 pub mod ft991a_radio;
 pub mod profile;
