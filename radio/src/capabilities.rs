@@ -454,3 +454,120 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mode identity across the two vocabularies
+// ---------------------------------------------------------------------------
+
+/// This radio's mode for a protocol [`ModeId`], or `None` if it has none.
+///
+/// One mapping, here, because two callers need it — the server's console
+/// adapter and any console speaking the native protocol — and a radio that
+/// disagreed with itself about what `DataUsb` means depending on which end
+/// of the socket you asked would be a genuinely confusing bug to chase.
+///
+/// The FT-991A maps almost one-to-one: it is the radio in this fleet with
+/// the widest mode set, and `ModeId` was drawn to cover it. `C4fm` is
+/// here and is *not* on the TS-570D, which is the point of the mapping
+/// being per-radio.
+pub fn to_mode(id: ModeId) -> Option<crate::Mode> {
+    use crate::Mode;
+    Some(match id {
+        ModeId::Lsb => Mode::Lsb,
+        ModeId::Usb => Mode::Usb,
+        ModeId::CwUpper => Mode::CwU,
+        ModeId::CwLower => Mode::CwL,
+        ModeId::Fm => Mode::Fm,
+        ModeId::FmNarrow => Mode::FmN,
+        ModeId::Am => Mode::Am,
+        ModeId::AmNarrow => Mode::AmN,
+        ModeId::RttyLsb => Mode::RttyLsb,
+        ModeId::RttyUsb => Mode::RttyUsb,
+        ModeId::DataLsb => Mode::DataLsb,
+        ModeId::DataUsb => Mode::DataUsb,
+        ModeId::DataFm => Mode::DataFm,
+        ModeId::C4fm => Mode::C4fm,
+        _ => return None,
+    })
+}
+
+/// The protocol [`ModeId`] for one of this radio's modes.
+pub fn from_mode(mode: crate::Mode) -> ModeId {
+    use crate::Mode;
+    match mode {
+        Mode::Lsb => ModeId::Lsb,
+        Mode::Usb => ModeId::Usb,
+        Mode::CwU => ModeId::CwUpper,
+        Mode::CwL => ModeId::CwLower,
+        Mode::Fm => ModeId::Fm,
+        Mode::FmN => ModeId::FmNarrow,
+        Mode::Am => ModeId::Am,
+        Mode::AmN => ModeId::AmNarrow,
+        Mode::RttyLsb => ModeId::RttyLsb,
+        Mode::RttyUsb => ModeId::RttyUsb,
+        Mode::DataLsb => ModeId::DataLsb,
+        Mode::DataUsb => ModeId::DataUsb,
+        Mode::DataFm => ModeId::DataFm,
+        Mode::C4fm => ModeId::C4fm,
+    }
+}
+
+#[cfg(test)]
+mod mode_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn every_mode_this_radio_has_survives_a_round_trip() {
+        // A mode set over the protocol and read back must be the same
+        // mode. This radio has fourteen and four pairs of them differ only
+        // by sideband or by narrow/wide — exactly the pairs a mapping
+        // collapses by accident.
+        for mode in [
+            crate::Mode::Lsb,
+            crate::Mode::Usb,
+            crate::Mode::CwU,
+            crate::Mode::CwL,
+            crate::Mode::Fm,
+            crate::Mode::FmN,
+            crate::Mode::Am,
+            crate::Mode::AmN,
+            crate::Mode::RttyLsb,
+            crate::Mode::RttyUsb,
+            crate::Mode::DataLsb,
+            crate::Mode::DataUsb,
+            crate::Mode::DataFm,
+            crate::Mode::C4fm,
+        ] {
+            assert_eq!(to_mode(from_mode(mode)), Some(mode), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_pairs_that_differ_only_by_a_hair_stay_distinct() {
+        // Narrow and wide, and the two CW sidebands. Collapsing either
+        // pair puts an operator in a mode they did not ask for and that
+        // still looks plausible on screen.
+        for (a, b) in [
+            (crate::Mode::Fm, crate::Mode::FmN),
+            (crate::Mode::Am, crate::Mode::AmN),
+            (crate::Mode::CwU, crate::Mode::CwL),
+            (crate::Mode::RttyLsb, crate::Mode::RttyUsb),
+            (crate::Mode::DataLsb, crate::Mode::DataUsb),
+        ] {
+            assert_ne!(from_mode(a), from_mode(b), "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_declared_modes_are_exactly_the_ones_this_mapping_accepts() {
+        // If capabilities offers a console a mode this cannot apply, the
+        // console shows a control that fails when used.
+        for descriptor in FT991A.modes {
+            assert!(
+                to_mode(descriptor.id).is_some(),
+                "{} is offered to consoles but cannot be applied",
+                descriptor.label
+            );
+        }
+    }
+}

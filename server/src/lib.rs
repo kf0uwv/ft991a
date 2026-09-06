@@ -36,8 +36,10 @@
 //! (`main.rs`) sees one `run` either way and needs no platform branching
 //! of its own beyond `.await`ing it only on Linux.
 
+mod console;
 mod rigctl_radio;
 
+use console::ConsoleFt991a;
 use rigctl_radio::Ft991aRigctl;
 
 pub use cat_rigctl::ServerConfig;
@@ -56,9 +58,28 @@ where
     S: cat_transport_core::CatSession + 'static,
     S::Error: std::error::Error + 'static,
 {
-    cat_rigctl::run(session, &radio::FT991A_COMMAND_TABLE, config, |s| {
-        Ft991aRigctl::new(radio::Ft991a::new(s))
-    })
+    // A console listener is built only when one was asked for. The
+    // handle is what carries state and frames between the broker's
+    // runtime and the blocking listener, and a server running rigctl
+    // alone should not pay for it.
+    let shared = config
+        .native_port
+        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::FT991A));
+    if let Some(shared) = shared.clone() {
+        // Authored by the crate that knows this radio -- and deliberately
+        // not the TS-570D's: no spectrum panel, a taller meter rail, and
+        // the workspace given the room a waterfall would have taken.
+        shared.set_layout(radio::console_layout::layout());
+        shared.set_theme(radio::console_layout::theme());
+    }
+    cat_rigctl::run_with_native(
+        session,
+        &radio::FT991A_COMMAND_TABLE,
+        config,
+        |s| Ft991aRigctl::new(radio::Ft991a::new(s)),
+        |s| ConsoleFt991a(radio::Ft991a::new(s)),
+        shared,
+    )
     .await
 }
 
@@ -73,9 +94,24 @@ where
     S: cat_transport_core::CatSession + Send + 'static,
     S::Error: std::error::Error + 'static,
 {
-    cat_rigctl::run(session, &radio::FT991A_COMMAND_TABLE, config, |s| {
-        Ft991aRigctl::new(radio::Ft991a::new(s))
-    })
+    let shared = config
+        .native_port
+        .map(|_| cat_rigctl::native_bridge::NativeShared::new(&radio::capabilities::FT991A));
+    if let Some(shared) = shared.clone() {
+        // Authored by the crate that knows this radio -- and deliberately
+        // not the TS-570D's: no spectrum panel, a taller meter rail, and
+        // the workspace given the room a waterfall would have taken.
+        shared.set_layout(radio::console_layout::layout());
+        shared.set_theme(radio::console_layout::theme());
+    }
+    cat_rigctl::run_with_native(
+        session,
+        &radio::FT991A_COMMAND_TABLE,
+        config,
+        |s| Ft991aRigctl::new(radio::Ft991a::new(s)),
+        |s| ConsoleFt991a(radio::Ft991a::new(s)),
+        shared,
+    )
 }
 
 // Gated to Linux: exercises the `async fn run` implementation via

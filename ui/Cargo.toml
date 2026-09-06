@@ -25,6 +25,8 @@ crossterm = { workspace = true }
 # moves out is anything with one correct answer per input.
 cat-ui = { workspace = true }
 cat-ui-ratatui = { workspace = true }
+# The capability document the shared console derives itself from.
+cat-native = { workspace = true }
 cat-framework = { workspace = true }
 
 [dev-dependencies]

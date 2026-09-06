@@ -77,3 +77,9 @@ See [ADR 0001](0001-second-radio-on-shared-cat-framework.md),
 the diagnostics engine itself),
 [ADR 0005](0005-debian-and-windows-packaging.md), and
 [ADR 0006](0006-hand-coded-full-parity-diagnostics.md) for the design record.
+
+[ADR 0007](0007-console-protocol-and-gui.md) adds the typed console
+protocol (`--console-port`, alongside `--rigctl-port` rather than instead
+of it) and a GPU console — which lives in `cat-ui-egui` and is shared with
+every other radio, because it derives everything it draws from the
+capability document. This repo supplies a window and a demo fixture.

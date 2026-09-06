@@ -35,6 +35,8 @@ cat-transport-core = { workspace = true }
 # (`src/rigctl_radio.rs`, via the local `Ft991aRigctl<S>` wrapper — see its
 # doc comment for why a wrapper is needed) and a thin `run()` wrapper.
 cat-rigctl = { workspace = true }
+# The console protocol's own types, for the `NativeRadio` impl.
+cat-native = { workspace = true }
 
 # For `RigctlRadio::capabilities`, which hands `cat-rigctl` this radio's
 # own description so `\dump_state`'s tail is generated rather than

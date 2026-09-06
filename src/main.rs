@@ -210,12 +210,16 @@ struct ServerArgs {
     raw_tcp_port: Option<u16>,
     raw_udp_port: Option<u16>,
     rigctl_port: Option<u16>,
+    /// The typed console protocol, for `ft991a-gui` and for
+    /// `ft991a --server`.
+    console_port: Option<u16>,
 }
 
 fn server_usage_exit() -> ! {
     eprintln!(
         "Usage: ft991a server --port <serial-port-path> [--baud <rate>] [--stop-bits <n>]\n\
                      [--raw-tcp-port <port>] [--raw-udp-port <port>] [--rigctl-port <port>]\n\
+                     [--console-port <port>]\n\
          \n\
            --port          Serial port path (required)\n\
            --baud          Baud rate: 4800, 9600, 19200, 38400  (default: 9600)\n\
@@ -240,6 +244,7 @@ fn parse_server_args() -> ServerArgs {
     let mut raw_tcp_port: Option<u16> = None;
     let mut raw_udp_port: Option<u16> = None;
     let mut rigctl_port: Option<u16> = None;
+    let mut console_port: Option<u16> = None;
 
     fn parse_port_number(val: Option<String>, flag: &str) -> u16 {
         match val.and_then(|v| v.parse::<u16>().ok()) {
@@ -307,13 +312,23 @@ fn parse_server_args() -> ServerArgs {
             Some("--rigctl-port") => {
                 rigctl_port = Some(parse_port_number(args_iter.next(), "--rigctl-port"))
             }
+            Some("--console-port") => {
+                console_port = Some(parse_port_number(args_iter.next(), "--console-port"))
+            }
             Some(_) => {}
             None => break,
         }
     }
 
-    if raw_tcp_port.is_none() && raw_udp_port.is_none() && rigctl_port.is_none() {
-        eprintln!("error: at least one of --raw-tcp-port/--raw-udp-port/--rigctl-port is required");
+    if raw_tcp_port.is_none()
+        && raw_udp_port.is_none()
+        && rigctl_port.is_none()
+        && console_port.is_none()
+    {
+        eprintln!(
+            "error: at least one of --raw-tcp-port/--raw-udp-port/--rigctl-port/--console-port \
+             is required"
+        );
         std::process::exit(1);
     }
 
@@ -325,6 +340,7 @@ fn parse_server_args() -> ServerArgs {
             raw_tcp_port,
             raw_udp_port,
             rigctl_port,
+            console_port,
         },
         None => server_usage_exit(),
     }
@@ -365,6 +381,7 @@ async fn run_server_mode() {
         raw_tcp_port: args.raw_tcp_port,
         raw_udp_port: args.raw_udp_port,
         rigctl_port: args.rigctl_port,
+        native_port: args.console_port,
     };
 
     if let Err(e) = server::run(session, config).await {
@@ -408,6 +425,7 @@ async fn run_server_mode() {
         raw_tcp_port: args.raw_tcp_port,
         raw_udp_port: args.raw_udp_port,
         rigctl_port: args.rigctl_port,
+        native_port: args.console_port,
     };
 
     if let Err(e) = server::run(session, config) {

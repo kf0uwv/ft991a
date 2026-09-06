@@ -123,6 +123,48 @@ impl Default for Ft991aDisplay {
     }
 }
 
+/// This radio's display state, as the shared console wants it.
+///
+/// The console in `cat-ui-ratatui` draws a `cat_ui::display::RadioDisplay`,
+/// which is the same shape for every radio. This crate keeps its own
+/// struct because its other screens are written against it and because it
+/// carries things the shared one has no field for — `TxState`
+/// distinguishing *this session* keying from the front panel, the RTS line,
+/// the radio's `ID` string.
+///
+/// So this converts rather than replaces. The fields this radio does not
+/// poll stay at their defaults, which the console draws as placeholders
+/// rather than as confident zeros.
+pub fn console_display(state: &Ft991aDisplay) -> cat_ui::display::RadioDisplay {
+    cat_ui::display::RadioDisplay {
+        vfo_a_hz: state.vfo_a_hz,
+        vfo_b_hz: state.vfo_b_hz,
+        mode: state.mode.name().to_string(),
+        mode_id: Some(radio::capabilities::from_mode(state.mode)),
+        // Either cause of transmit is transmitting as far as a console is
+        // concerned. A readout showing RX while the operator holds the mic
+        // would be worse than one showing nothing.
+        tx: !matches!(state.tx_state, TxState::Off),
+        smeter: u16::from(state.smeter),
+        af_gain: state.af_gain,
+        rf_gain: state.rf_gain,
+        squelch: state.squelch,
+        // The FT-991A reports transmit power in watts; the shared field is
+        // a percentage of this radio's maximum, which is 100 W. The two
+        // happen to coincide numerically and that is worth saying out
+        // loud, because they will not on the next radio.
+        power_pct: state.power_watts,
+        connected: state.connected,
+        initializing: state.initializing,
+        poll_errors: state.poll_errors.clone(),
+        // No PTT-line item: this radio keys from a *second* serial port
+        // (docs/adr/0002), not from the CAT port's own DTR, so the console
+        // must not offer a control that would drive the wrong wire.
+        ptt_line_available: false,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

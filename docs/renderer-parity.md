@@ -14,15 +14,17 @@ Development cost is explicitly **not** a ground.
 
 ## Capability parity: TUI vs GUI
 
-**The GUI does not exist yet.** Every capability below is therefore
-TUI-only under ground (c), and this table collapses to a single row rather
-than one per feature — enumerating a hundred rows that all say "the GUI has
-not been written" would be noise, not a record. It becomes a real table the
-moment the first GUI panel ships.
+**The GUI now exists** (`ft991a/gui`, wiring around the shared
+`cat-ui-egui` console). Both renderers draw the same server-published
+`LayoutSpec` and `Theme` from `radio/src/console_layout.rs` and derive
+their bands, modes and meters from `capabilities::FT991A`, so structural
+parity is not something either console can drift out of on its own — it
+follows from both being handed the same document.
 
 | capability | missing from | ground | tracking |
 |---|---|---|---|
-| all of them | GUI | (c) | the GUI console, not yet started |
+| click-to-tune on the spectrum | TUI | (b) | A pointer gesture on a continuous surface. Moot here in any case — see the permanent row below. |
+| custom panels (`PanelKind::Custom`) | TUI | (c) | `cat-ui-egui` has a `Widgets` painter registry; `cat-ui-ratatui` has none and skips an unrecognised panel rather than naming it. Not currently exercised by this radio. |
 
 One item is worth naming ahead of that, because it is a **permanent**
 exception rather than a pending one:

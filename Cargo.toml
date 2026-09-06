@@ -13,7 +13,7 @@
 # TCP listener for WSJT-X). Linux-only (see that crate's own Cargo.toml
 # doc comment) — the `ft991a` binary only depends on it under
 # `cfg(target_os = "linux")`, so it never affects the Windows cross-check.
-members = ["radio", "ui", "emulator", "server"]
+members = ["radio", "ui", "emulator", "server", "gui"]
 resolver = "2"
 
 [workspace.package]
@@ -70,22 +70,44 @@ mockall = "0.12.1"
 # app's build is reproducible against a known-good, released snapshot of
 # the shared library instead of whatever happens to be on that repo's main
 # branch at build time.
-cat-framework = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-ui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-ui-ratatui = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-client = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-transport-core = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-transport-serial = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-framework = { path = "../radio-cat-rs/cat-framework" }
+cat-ui = { path = "../radio-cat-rs/cat-ui" }
+cat-ui-ratatui = { path = "../radio-cat-rs/cat-ui-ratatui" }
+cat-client = { path = "../radio-cat-rs/cat-client" }
+cat-transport-core = { path = "../radio-cat-rs/cat-transport-core" }
+cat-transport-serial = { path = "../radio-cat-rs/cat-transport-serial" }
 # Server mode only (Wave 5, `server` crate) — the request broker + raw
 # TCP/UDP listeners.
-cat-transport-tcp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-transport-udp = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
-cat-server = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-transport-tcp = { path = "../radio-cat-rs/cat-transport-tcp" }
+cat-transport-udp = { path = "../radio-cat-rs/cat-transport-udp" }
+cat-server = { path = "../radio-cat-rs/cat-server" }
 # Generic Hamlib rigctld-compatible TCP bridge + network-server
 # orchestration (`server` crate), radio-independent behind the
 # `RigctlRadio` trait. Replaces this app's previously hand-rolled
 # `server/src/rigctl.rs` + `server/src/lib.rs::run()`.
-cat-rigctl = { git = "https://github.com/kf0uwv/radio-cat-rs", tag = "v0.3.0" }
+cat-rigctl = { path = "../radio-cat-rs/cat-rigctl" }
+# The console protocol and the shared egui console. New in radio-cat-rs
+# and not yet in a release this repo pins, so they are path dependencies
+# and the [patch] below points every other radio-cat-rs crate at the same
+# local checkout -- otherwise two copies of cat-framework would exist and
+# a `RadioCapabilities` from one would not satisfy the other.
+# TEMPORARY: revert to a tagged git dependency once radio-cat-rs cuts the
+# release containing them.
+cat-native = { path = "../radio-cat-rs/cat-native" }
+cat-layout = { path = "../radio-cat-rs/cat-layout" }
+cat-signal = { path = "../radio-cat-rs/cat-signal" }
+cat-ui-egui = { path = "../radio-cat-rs/cat-ui-egui" }
+
+# The GPU console's window and event loop. `eframe` belongs to the binary,
+# not to the widget crate (radio-cat-rs ADR 0011's seam), which is why it
+# appears here and not in `cat-ui-egui`.
+eframe = { version = "0.29", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+egui = "0.29"
 
 [package]
 name = "ft991a"
@@ -189,3 +211,14 @@ all-features = true
 # Build command: cargo build --release
 # Test command: cargo test
 # Lint command: cargo clippy && cargo fmt
+
+
+# TEMPORARY. `ts570d` reaches radio-cat-rs by tagged git dependency with a
+# [patch] pointing at the sibling checkout; this repo cannot, because the
+# tag it pinned (v0.3.0) predates the crates this port needs and a
+# [patch] only substitutes for a matching version. Path dependencies say
+# the same thing without the indirection: one copy of every shared crate,
+# taken from the checkout next door.
+#
+# Revert to tagged git dependencies when radio-cat-rs cuts the release
+# containing `cat-native`, `cat-ui-egui`, and the console protocol.

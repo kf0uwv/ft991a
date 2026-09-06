@@ -119,6 +119,7 @@
 //! ```
 
 pub mod capabilities;
+pub mod console_layout;
 pub mod ft991a;
 pub mod ft991a_radio;
 pub mod profile;

@@ -1,0 +1,40 @@
+[package]
+name = "gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "GPU-rendered TS-570D console (egui/wgpu), speaking the native protocol"
+rust-version.workspace = true
+
+[[bin]]
+name = "ft991a-gui"
+path = "src/main.rs"
+
+[dependencies]
+# ADR 0008 section 3. This crate owns THIS RADIO'S layout, feature set and
+# visual identity, and nothing else. Notably absent, and deliberately:
+# `radio` (the GUI is network-only and never speaks CAT), any
+# `cat-transport-*`, and `cat-framework` directly -- `cat-native`
+# re-exports the vocabulary its own wire types are written in.
+cat-native = { workspace = true }
+cat-ui = { workspace = true }
+cat-ui-egui = { workspace = true }
+cat-signal = { workspace = true }
+
+eframe = { workspace = true }
+egui = { workspace = true }
+
+[dev-dependencies]
+radio = { path = "../radio" }
+# The still renderer draws a radio in its own colours, which means naming
+# the radio. Only the example does; the binary stays protocol-only, which
+# is the boundary ADR 0008 §3 draws.
+# The offscreen renderer in examples/render.rs. Not shipped: it exists so
+# a change to the console can be LOOKED at on a machine with no display,
+# which is the thing whose absence let this crate ship not resembling the
+# design it was built from.
+wgpu = "22"
+egui-wgpu = "0.29"
+pollster = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }

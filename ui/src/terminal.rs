@@ -102,21 +102,89 @@ fn cleanup_terminal() -> UiResult<()> {
 }
 
 /// Draw a single frame using the given radio state and control state.
+/// Carry out what the console's command line asked for.
+///
+/// Straight to the radio rather than through a queue: this console polls
+/// and draws on one task, so there is nothing to hand a command to. The
+/// mapping from the shared vocabulary to this radio's own lives in
+/// `radio::capabilities`, so a mode set from the command line and one set
+/// over the network protocol mean the same thing.
+async fn apply_console_action<R: Radio>(
+    action: cat_ui::command::Action,
+    view: &mut cat_ui_ratatui::console::ConsoleView,
+    radio: &mut R,
+) {
+    use cat_native::Command;
+    use cat_ui::command::Action;
+
+    match action {
+        // Quit is the caller's to act on; it never reaches here because
+        // `handle_key` returns it as an action and the loop breaks on the
+        // radio's own `q`.
+        Action::Quit => {}
+        // Handled inside `console::handle_key`; it never reaches here.
+        Action::SelectTab(_) => {}
+        Action::Radio(command) => match command {
+            Command::SetFrequency { hz, .. } | Command::Retune { hz } => {
+                match Frequency::new(hz) {
+                    // The confirmed value stays on screen and the
+                    // requested one follows it until a poll confirms.
+                    Ok(f) => {
+                        view.pending_vfo_hz = Some(hz);
+                        if let Err(e) = radio.set_vfo_a(f).await {
+                            view.message = Some(e.to_string());
+                            view.pending_vfo_hz = None;
+                        }
+                    }
+                    Err(e) => view.message = Some(e.to_string()),
+                }
+            }
+            Command::SetMode { mode } => match radio::capabilities::to_mode(mode) {
+                Some(m) => {
+                    if let Err(e) = radio.set_mode(m).await {
+                        view.message = Some(e.to_string());
+                    }
+                }
+                None => view.message = Some(format!("this radio has no {mode:?} mode")),
+            },
+            Command::SetMemoryChannel { channel } => match u8::try_from(channel) {
+                Ok(n) => {
+                    if let Err(e) = radio.set_memory_channel(n).await {
+                        view.message = Some(e.to_string());
+                    }
+                }
+                Err(_) => view.message = Some("memory channel out of range".to_string()),
+            },
+            // Nothing this console sends yet. Reported rather than
+            // swallowed, so an operator who types one is told.
+            other => view.message = Some(format!("{other:?} is not wired to this console yet")),
+        },
+    }
+}
+
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &Ft991aDisplay,
     control: &ControlState,
+    view: &cat_ui_ratatui::console::ConsoleView,
+    caps: &cat_native::CapabilitiesWire,
 ) -> UiResult<()> {
+    let display = crate::console_display(state);
     terminal.draw(|f| {
-        let area = f.size();
-        let (header_area, status_area, errors_area, ctrl_area) = split_areas(area);
-        draw_header(f, header_area);
-        draw_status(f, status_area, state);
-        draw_errors(f, errors_area, state);
+        // The accepted design is the resting state, and it is the same
+        // console `ts570d` draws -- capability-derived, so this radio's
+        // fourteen modes, 151 menu items and absent spectrum tab come from
+        // its own declaration rather than from anything written here.
+        //
+        // Everything the design did not place -- this radio's own command
+        // groups, and the disconnected screen -- overlays the tab body, so
+        // the console is what an operator looks at and a menu is somewhere
+        // they are briefly.
+        let body = cat_ui_ratatui::console::draw(f, f.size(), &display, view, caps);
         if state.initializing || !state.connected {
-            draw_disconnected(f, ctrl_area, &state.poll_errors, state.initializing);
-        } else {
-            draw_control_panel(f, ctrl_area, control);
+            draw_disconnected(f, body, &state.poll_errors, state.initializing);
+        } else if !matches!(control, ControlState::Menu) {
+            draw_control_panel(f, body, control);
         }
     })?;
     Ok(())
@@ -2732,10 +2800,20 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
 ) -> UiResult<()> {
     let mut display = Ft991aDisplay::default();
     let mut control = ControlState::default();
+    // Built once: what this radio is does not change while it is running,
+    // and the console reads it on every frame.
+    // With the layout this radio's crate authors -- the same answer its
+    // server publishes to a remote console, so the two look alike.
+    let caps = {
+        let mut caps = cat_native::CapabilitiesWire::from(&radio::capabilities::FT991A);
+        caps.layout = Some(radio::console_layout::layout());
+        caps
+    };
+    let mut view = cat_ui_ratatui::console::ConsoleView::for_capabilities(&caps);
     let mut fail_cycles: u32 = 0;
 
     // Draw initial "connecting" frame before the first poll.
-    draw_frame(terminal, &display, &control)?;
+    draw_frame(terminal, &display, &control, &view, &caps)?;
 
     // One-time ID fetch (§6.6) — ID is a fixed protocol constant, not
     // polled per-tick.
@@ -2764,7 +2842,7 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
             last_poll = Instant::now();
         }
 
-        draw_frame(terminal, &display, &control)?;
+        draw_frame(terminal, &display, &control, &view, &caps)?;
 
         if event::poll(EVENT_POLL_TIMEOUT).map_err(UiError::Io)? {
             // Unix terminals only ever report key-down as `Event::Key`, so
@@ -2780,6 +2858,34 @@ async fn run_loop<R: Radio + Ft991aExtras + CwKeying>(
             // than relying on OS key-repeat.
             if let Event::Key(key) = event::read().map_err(UiError::Io)? {
                 if key.kind == KeyEventKind::Press {
+                    // The console gets first refusal, but only while this
+                    // radio's own command groups are not in the middle of
+                    // something: a digit inside a group, or a keystroke
+                    // inside a prompt, belongs to that group.
+                    // `console::handle_key` passes through everything it
+                    // does not own, so the groups keep every key they had.
+                    if matches!(control, ControlState::Menu) {
+                        match cat_ui_ratatui::console::handle_key(key, &mut view, &caps) {
+                            cat_ui_ratatui::console::ConsoleKey::Consumed
+                            | cat_ui_ratatui::console::ConsoleKey::Rejected(_) => continue,
+                            cat_ui_ratatui::console::ConsoleKey::Action(action) => {
+                                apply_console_action(action, &mut view, radio).await;
+                                continue;
+                            }
+                            // This radio's server has no device directory
+                            // and this console attaches nothing locally:
+                            // it declares no IF tap, so there is no
+                            // source to pick. Reported rather than
+                            // silently ignored.
+                            cat_ui_ratatui::console::ConsoleKey::Attach(_)
+                            | cat_ui_ratatui::console::ConsoleKey::RefreshDevices => {
+                                view.message =
+                                    Some("this radio has no signal sources to attach".to_string());
+                                continue;
+                            }
+                            cat_ui_ratatui::console::ConsoleKey::Passthrough => {}
+                        }
+                    }
                     match handle_key(key, &mut control, &display) {
                         KeyResult::Quit => break,
                         KeyResult::Continue => {}

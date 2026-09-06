@@ -11,6 +11,9 @@ rust-version.workspace = true
 # Generic CAT engine + client mechanics, external from radio-cat-rs — see
 # docs/adr/0001-second-radio-on-shared-cat-framework.md.
 cat-framework = { workspace = true }
+# The console arrangement this radio asks for. A declaration about the
+# rig, like `capabilities`, and it lives beside it for the same reason.
+cat-layout = { workspace = true }
 cat-client = { workspace = true }
 cat-transport-core = { workspace = true }
 

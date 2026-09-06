@@ -223,7 +223,9 @@ radio  (depends on: cat-framework, cat-client, cat-transport-core)
       the `[D]` screen (ui/src/terminal.rs, ui/src/diagnostics.rs) calls
       typed Radio/Ft991aExtras methods directly instead (docs/adr/0006)
 
-ui  (depends on: radio only)
+ui  (depends on: radio, cat-ui, cat-ui-ratatui, cat-native — the console
+     itself lives in cat-ui-ratatui and is shared with every other radio;
+     this crate supplies wiring, not painting)
   └── uses: radio::{Radio, Ft991aExtras, CwKeying} trait bounds
       (ui::run<R: Radio + Ft991aExtras + CwKeying + 'static>(radio: R)) —
       this is a disclosed, real widening from "any Radio implementation":
