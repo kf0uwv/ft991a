@@ -51,8 +51,6 @@ pub use cat_ui_egui::{app, devices, readout, theme, tuning};
 // is the failure mode radio-cat-rs ADR 0013 exists to prevent.
 pub use cat_ui::{command, quick, workspace};
 
-pub mod demo;
-
 pub use command::{Action, ParseError};
 pub use quick::Control;
 pub use workspace::{Tab, TabEntry};

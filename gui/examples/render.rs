@@ -50,7 +50,22 @@ fn main() {
         cat_ui_egui::theme::Palette::from_theme(&radio::console_layout::theme()),
     );
     console.demo_capabilities({
-        let mut c = gui::demo::ft991a();
+        // Derived from this radio's own declaration, never transcribed.
+        //
+        // These were hand-written in `gui::demo` for a while, as a
+        // `CapabilitiesWire` -- the shape that arrives from a server --
+        // because `gui` is network-only and never depends on `radio`.
+        // That reasoning is right for the *crate* and wrong for a still:
+        // the copy drifted to five meters where the radio declares seven,
+        // so every picture taken from it was missing `VDD` and `COMP`,
+        // and a meter absent from a rail looks exactly like a radio that
+        // does not have one.
+        //
+        // An example is the one place that can have it both ways. `radio`
+        // is a dev-dependency here, so this file sees the real
+        // declaration while the shipped binary stays protocol-only, which
+        // is the boundary ADR 0008 §3 draws.
+        let mut c = cat_native::CapabilitiesWire::from(&radio::capabilities::FT991A);
         c.theme = Some(radio::console_layout::theme());
         c.layout = Some(radio::console_layout::layout());
         c

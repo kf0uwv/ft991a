@@ -66,10 +66,16 @@ pub fn layout() -> LayoutSpec {
                 Child::new(
                     Size::Fixed(RAIL_W),
                     Node::rows(vec![
-                        // Five meters need the height. They are also the
-                        // most-read thing on this radio, which has no
-                        // waterfall to compete for attention.
-                        Child::panel(Size::Min(6), PanelKind::MeterRail),
+                        // This radio declares seven meters. The renderer says how
+                        // many rows that needs, because the two consoles spend
+                        // different amounts on each: the terminal console one row,
+                        // the GPU console a label row and a bar.
+                        //
+                        // It was `Min(n)`, which absorbed every spare row in the
+                        // column and still was not enough -- the GPU console drew
+                        // five of the seven and simply stopped, and a meter missing
+                        // from a rail looks like a radio that does not have one.
+                        Child::panel(Size::Natural, PanelKind::MeterRail),
                         Child::panel(Size::Fixed(5), PanelKind::AfScope),
                         Child::panel(Size::Fixed(5), PanelKind::AfFft),
                     ]),
