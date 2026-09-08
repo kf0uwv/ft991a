@@ -56,6 +56,10 @@ where
     type Mode = Mode;
     type Error = radio::RadioError;
 
+    fn unsupported() -> Self::Error {
+        radio::RadioError::NotImplemented
+    }
+
     async fn get_vfo_a_hz(&mut self) -> Result<u64, Self::Error> {
         self.0.get_vfo_a().await.map(Frequency::hz)
     }
