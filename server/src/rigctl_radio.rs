@@ -56,6 +56,10 @@ where
     type Mode = Mode;
     type Error = radio::RadioError;
 
+    fn unsupported() -> Self::Error {
+        radio::RadioError::NotImplemented
+    }
+
     async fn get_vfo_a_hz(&mut self) -> Result<u64, Self::Error> {
         self.0.get_vfo_a().await.map(Frequency::hz)
     }
@@ -146,6 +150,61 @@ where
         (range.min_hz, range.max_hz)
     }
 
+    /// Split, from `FT` -- which VFO is the TX band.
+    ///
+    /// `RigctlRadio` defaults both halves of this to a refusal, and this
+    /// impl inherited it while `get_tx_vfo`/`set_tx_vfo` sat one call
+    /// away. Rigctl's `s` therefore answered "not split" on a radio in
+    /// split, and `S 1` refused: a defaulted method nobody overrode is
+    /// indistinguishable from a radio that cannot do the thing.
+    async fn get_split(&mut self) -> Result<bool, Self::Error> {
+        self.0.get_tx_vfo().await.map(|vfo| vfo != 0)
+    }
+
+    async fn set_split(&mut self, on: bool) -> Result<(), Self::Error> {
+        self.0.set_tx_vfo(u8::from(on)).await
+    }
+
+    /// The clarifier offset, from the `IF` record that already carries it.
+    ///
+    /// Yaesu calls it the clarifier; hamlib calls it RIT. Zero when RX
+    /// CLAR is off: the radio keeps the offset across the switch, and
+    /// reporting it while it is not applied would describe a receiver
+    /// other than the one listening.
+    ///
+    /// There is no matching setter. This radio's CAT set has `RC` to
+    /// clear and `RU`/`RD` to step, and nothing that takes a frequency --
+    /// so `I`/`X` stay refused rather than pretending. Same shape as the
+    /// TS-570D, for the same reason.
+    async fn get_rit_hz(&mut self) -> Result<i32, Self::Error> {
+        let info = self.0.get_information().await?;
+        Ok(if info.rx_clarifier_on {
+            i32::from(info.clarifier_offset_hz)
+        } else {
+            0
+        })
+    }
+
+    async fn get_xit_hz(&mut self) -> Result<i32, Self::Error> {
+        // One offset field, two switches: P4 and P5 of the same record
+        // say whether it is applied to receive, transmit or both.
+        let info = self.0.get_information().await?;
+        Ok(if info.tx_clarifier_on {
+            i32::from(info.clarifier_offset_hz)
+        } else {
+            0
+        })
+    }
+
+    /// The `ModeId` -> `Mode` crossing, so a cached poll can answer `m`.
+    ///
+    /// Without it every mode read goes to the wire: the cache falls
+    /// through rather than guessing, which is safe but spends the link on
+    /// a question already answered.
+    fn mode_from_id(id: cat_framework::capabilities::ModeId) -> Option<Self::Mode> {
+        radio::capabilities::to_mode(id)
+    }
+
     /// Publish what this radio is, so `\dump_state`'s capability tail is
     /// **generated** rather than a placeholder.
     ///
@@ -176,6 +235,105 @@ mod tests {
 
     fn wrap(session: ScriptedCatSession) -> Ft991aRigctl<ScriptedCatSession> {
         Ft991aRigctl::new(Ft991a::new(session))
+    }
+
+    /// An `IF` answer with the clarifier fields set as named.
+    ///
+    /// Built from the manual's P1..P10 layout (CAT reference p.16) rather
+    /// than a captured string, so a field that moves shows up here as a
+    /// width error instead of as a silently shifted read.
+    fn if_answer(offset: i16, rx_clar: bool, tx_clar: bool) -> String {
+        format!(
+            "IF{channel:03}{freq:09}{sign}{offset:04}{rx}{tx}{mode}{select}{tone}00{shift};",
+            channel = 0,
+            freq = 14_250_000u64,
+            sign = if offset < 0 { '-' } else { '+' },
+            offset = offset.unsigned_abs(),
+            rx = u8::from(rx_clar),
+            tx = u8::from(tx_clar),
+            mode = 2, // USB
+            select = 0,
+            tone = 0,
+            shift = 0,
+        )
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn split_survives_the_round_trip_through_the_bridge() {
+        // `get_split`/`set_split` are defaulted on the trait and this impl
+        // inherited both, so rigctl's `s` answered "not split" on a radio
+        // in split and `S 1` refused -- while `FT` sat one call away.
+        // Asserting the exchange rather than the methods' presence means
+        // deleting either impl fails here instead of compiling quietly.
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "FT;", "FT1;",
+        )]));
+        assert!(RigctlRadio::get_split(&mut radio).await.unwrap());
+
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "FT;", "FT0;",
+        )]));
+        assert!(!RigctlRadio::get_split(&mut radio).await.unwrap());
+
+        // `FT`'s set domain is not its answer domain: 0/1 report, 2/3
+        // write. The radio crate translates, and this is the assertion
+        // that the bridge lets it rather than passing 0/1 through.
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "FT3;", "",
+        )]));
+        RigctlRadio::set_split(&mut radio, true).await.unwrap();
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn the_clarifier_offset_reaches_rigctl_as_rit_and_xit() {
+        // Yaesu's clarifier is hamlib's RIT. Both were refused before,
+        // though `IF` had been carrying the offset and both switches all
+        // along.
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "IF;",
+            if_answer(-1234, true, false),
+        )]));
+        assert_eq!(RigctlRadio::get_rit_hz(&mut radio).await.unwrap(), -1234);
+
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "IF;",
+            if_answer(500, false, true),
+        )]));
+        assert_eq!(RigctlRadio::get_xit_hz(&mut radio).await.unwrap(), 500);
+    }
+
+    #[monoio::test(driver = "legacy")]
+    async fn an_offset_the_radio_is_not_applying_reads_as_zero() {
+        // The radio keeps the offset across the switch. Reporting a stored
+        // offset that is not being applied would describe a receiver other
+        // than the one actually listening, which is worse than saying
+        // zero: a client would correct for a shift that is not there.
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "IF;",
+            if_answer(-1234, false, false),
+        )]));
+        assert_eq!(RigctlRadio::get_rit_hz(&mut radio).await.unwrap(), 0);
+
+        let mut radio = wrap(ScriptedCatSession::with_script(vec![Exchange::new(
+            "IF;",
+            if_answer(-1234, false, false),
+        )]));
+        assert_eq!(RigctlRadio::get_xit_hz(&mut radio).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn every_mode_this_radio_declares_crosses_back_from_its_shared_id() {
+        // `mode_from_id` lets a cached poll answer `m` without going to
+        // the wire. It was never overridden, so it returned `None` for
+        // everything and every mode read went out over the link.
+        for descriptor in radio::capabilities::FT991A.modes.iter() {
+            assert!(
+                <Ft991aRigctl<ScriptedCatSession> as RigctlRadio>::mode_from_id(descriptor.id)
+                    .is_some(),
+                "{} is declared but does not cross back from its ModeId",
+                descriptor.label
+            );
+        }
     }
 
     #[test]

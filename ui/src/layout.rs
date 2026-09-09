@@ -1017,11 +1017,21 @@ mod tests {
 
     #[test]
     fn no_s_unit_is_claimed_for_a_scale_nobody_calibrated() {
-        // The manual gives no S-unit breakpoints for the 0-255 scale, so
-        // the radio publishes no table and the row shows the raw number
-        // instead. Inventing one here would be a claim about hardware.
+        // The CAT manual gives `SM`'s wire format (p.17, `000 - 255`) and
+        // no S-unit breakpoints at all, so this radio publishes no table.
+        // Inventing one here would be a claim about hardware.
         let state = Ft991aDisplay::default();
-        assert!(smeter_reading(&state).unwrap().s_units.is_none());
+        let reading = smeter_reading(&state).unwrap();
+        assert!(reading.s_units.is_none());
+
+        // This test used to stop there, and its comment claimed "the row
+        // shows the raw number instead". It does not: `s_unit()` falls
+        // back to the generic formula, so the console has always shown an
+        // S-unit for this radio, derived from a curve nobody measured. The
+        // fallback is deliberate -- a bar with no number was worse -- but
+        // the console must not present it as a reading. It is marked.
+        assert!(!reading.s_unit_is_measured());
+        assert_eq!(reading.s_unit_display(), format!("~{}", reading.s_unit()));
     }
 
     #[test]
