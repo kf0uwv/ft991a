@@ -17,6 +17,10 @@ radio = { path = "../radio" }
 # Only CatFramework is used (generic dispatch engine) — approved architecture
 # exception, same as the `radio` dependency above.
 cat-framework = { workspace = true }
+# The shared S-unit formula, so the emulator's panel and the console
+# it exists to test cannot disagree about the same raw value. Approved
+# architecture exception, same as the `radio` dependency above.
+cat-ui = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }

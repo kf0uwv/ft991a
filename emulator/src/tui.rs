@@ -204,31 +204,47 @@ fn tick_label_line(width: usize, ticks: &[(usize, &str)]) -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
-/// Map an `SM` raw value (0–255, manual p.17) to a human-readable S-unit
-/// label.
+/// The radio's own S-meter descriptor, for its declared range.
+fn s_meter() -> Option<&'static cat_framework::capabilities::MeterDescriptor> {
+    radio::capabilities::FT991A
+        .meters
+        .find(cat_framework::capabilities::MeterKind::S)
+}
+
+/// Full scale for the S meter, from the descriptor rather than a literal.
+fn smeter_full_scale() -> u16 {
+    s_meter()
+        .map(|m| m.raw_range.max)
+        .filter(|m| *m > 0)
+        .unwrap_or(255)
+}
+
+/// Map an `SM` raw value (0-255, CAT manual p.17) to an S-unit label.
 ///
-/// **Not manual-cited**: the FT-991A CAT manual documents `SM`'s wire
-/// format (`SM0<3 digits>;`, 000-255) but no raw-value-to-S-unit curve.
-/// This is a synthetic linear mapping — 16 raw units per S-unit up to S9
-/// (raw 144), then four wider bands covering the remaining range for
-/// +10/+20/+30/+40 dB over S9 — chosen only to give the emulator's own TUI
-/// a readable label; it has no bearing on wire behavior.
+/// **Still not manual-cited**, and it cannot be: the FT-991A CAT manual
+/// documents `SM`'s wire format and no raw-value-to-S-unit curve at all,
+/// so nobody has measured where S9 falls on this scale.
+///
+/// What changed is whose guess it is. This carried its own synthetic
+/// ladder putting S9 at raw 144, while the console showed the shared
+/// fallback's S9 at raw 170 -- so the emulator's panel and the console it
+/// exists to test disagreed by about a unit and a half on the same raw
+/// value, and an operator comparing them would have been chasing a fault
+/// in neither. There is now one guess, in one place, and the console
+/// marks it `~` precisely because it is one.
 fn smeter_label(v: u8) -> &'static str {
-    match v {
-        0..=15 => "S1",
-        16..=31 => "S2",
-        32..=47 => "S3",
-        48..=63 => "S4",
-        64..=79 => "S5",
-        80..=95 => "S6",
-        96..=111 => "S7",
-        112..=127 => "S8",
-        128..=143 => "S9",
-        144..=170 => "S9+10",
-        171..=197 => "S9+20",
-        198..=224 => "S9+30",
-        _ => "S9+40",
-    }
+    let range = s_meter()
+        .map(|m| m.raw_range)
+        .unwrap_or(cat_framework::capabilities::RawRange::new(0, 255));
+    cat_ui::format::format_smeter_label(u16::from(v), range)
+}
+
+/// The lowest raw value that `smeter_label` calls `unit`.
+///
+/// Derived rather than tabulated, so a tick can never name one unit and
+/// sit under another.
+fn first_raw_labelled(unit: &str) -> Option<u16> {
+    (0..=smeter_full_scale()).find(|v| smeter_label(*v as u8) == unit)
 }
 
 fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
@@ -244,6 +260,9 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
         .split(area);
 
     let width = area.width as usize;
+    let full = usize::from(smeter_full_scale()).max(1);
+    let s9 = first_raw_labelled("S9").unwrap_or(0);
+    let s9_plus_30 = first_raw_labelled("S9+30").unwrap_or(u16::MAX);
 
     // Row 0: title left, current S-unit label right-aligned
     let label = smeter_label(state.smeter);
@@ -252,11 +271,16 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
     let title_line = Line::from(vec![
         Span::styled(title, Style::default().fg(Color::DarkGray)),
         Span::raw(" ".repeat(pad)),
+        // Green below S9, yellow to S9+20, red above -- placed by the same
+        // curve the label comes from. The literals here were 85 and 170,
+        // which under the old ladder put the yellow band at about S5 and
+        // the red at S9+10: the colour and the label disagreed about the
+        // same reading.
         Span::styled(
             label,
-            if state.smeter <= 85 {
+            if u16::from(state.smeter) < s9 {
                 Style::default().fg(Color::Green)
-            } else if state.smeter <= 170 {
+            } else if u16::from(state.smeter) < s9_plus_30 {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -264,23 +288,25 @@ fn draw_rx_smeter(f: &mut Frame, area: Rect, state: &RadioState) {
         ),
     ]);
 
-    // Row 1: tick mark labels at computed positions, mapped from the raw
-    // 0-255 scale onto the meter column's character width.
+    // Row 1: tick marks, placed by asking `smeter_label` where each unit
+    // starts rather than by repeating raw values it would have to be kept
+    // in step with. The previous literals were from the old ladder, so
+    // every tick sat about 25 raw counts left of the label it named.
     let ticks: Vec<(usize, &str)> = [
-        (16usize, "1"),
-        (48, "3"),
-        (80, "5"),
-        (112, "7"),
-        (144, "9"),
-        (200, "+20"),
+        ("S1", "1"),
+        ("S3", "3"),
+        ("S5", "5"),
+        ("S7", "7"),
+        ("S9", "9"),
+        ("S9+20", "+20"),
     ]
     .iter()
-    .map(|&(v, lbl)| (v * width / 255, lbl))
+    .filter_map(|&(unit, lbl)| first_raw_labelled(unit).map(|v| (v as usize * width / full, lbl)))
     .collect();
     let tick_str = tick_label_line(width, &ticks);
 
     // Row 2: bargraph, color based on fill ratio
-    let ratio = state.smeter as f64 / 255.0;
+    let ratio = (state.smeter as f64 / full as f64).min(1.0);
     let bar_color = if ratio <= 0.5 {
         Color::Green
     } else if ratio <= 0.75 {
@@ -817,10 +843,15 @@ mod tests {
 
     #[test]
     fn test_smeter_label_boundaries() {
-        assert_eq!(smeter_label(0), "S1");
-        assert_eq!(smeter_label(143), "S9");
-        assert_eq!(smeter_label(144), "S9+10");
-        assert_eq!(smeter_label(255), "S9+40");
+        // These were the old local ladder's boundaries: raw 0 = S1 (a
+        // meter reading nothing is S0, not S1), S9 at 143, and a top of
+        // S9+40 that the console never showed. The curve is now the
+        // console's, so the numbers moved -- see
+        // `smeter_scale_tests::the_panel_and_the_console_label_the_same_raw_value_the_same_way`
+        // for why that is the point rather than a regression.
+        assert_eq!(smeter_label(0), "S0");
+        assert_eq!(smeter_label(170), "S9");
+        assert_eq!(smeter_label(255), "S9+30");
     }
 
     #[test]
@@ -915,6 +946,64 @@ mod tests {
         assert_eq!(
             clarifier_readout(&state),
             Some("CLAR TX -9999Hz".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod smeter_scale_tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_and_the_console_label_the_same_raw_value_the_same_way() {
+        // The emulator exists to stand in for the radio, so its panel
+        // disagreeing with the console is a fault in the test instrument.
+        // It did: a local ladder put S9 at raw 144 and the console's
+        // shared fallback puts it at 170, so the two differed by about a
+        // unit and a half over most of the scale.
+        let range = radio::capabilities::FT991A
+            .meters
+            .find(cat_framework::capabilities::MeterKind::S)
+            .expect("declares an S meter")
+            .raw_range;
+        for raw in 0..=255u8 {
+            assert_eq!(
+                smeter_label(raw),
+                cat_ui::format::format_smeter_label(u16::from(raw), range),
+                "raw {raw} reads differently on the panel than on the console"
+            );
+        }
+    }
+
+    #[test]
+    fn full_scale_is_the_declared_range_and_not_a_literal() {
+        assert_eq!(smeter_full_scale(), 255);
+    }
+
+    #[test]
+    fn a_tick_sits_under_the_unit_it_names() {
+        // The ticks used to be literals from the old ladder, so each sat
+        // about 25 raw counts left of its own label. Deriving them means
+        // they cannot drift again.
+        for unit in ["S1", "S3", "S5", "S7", "S9"] {
+            let raw = first_raw_labelled(unit).unwrap_or_else(|| panic!("{unit} unreachable"));
+            assert_eq!(smeter_label(raw as u8), unit);
+            assert!(raw > 0 || unit == "S0", "{unit} at raw 0 is suspicious");
+        }
+    }
+
+    #[test]
+    fn the_ticks_ascend() {
+        // A tick out of order would draw one unit to the left of a lower
+        // one, which is the kind of fault a screenshot hides.
+        let raws: Vec<u16> = ["S1", "S3", "S5", "S7", "S9", "S9+20"]
+            .iter()
+            .filter_map(|u| first_raw_labelled(u))
+            .collect();
+        assert_eq!(raws.len(), 6, "a tick names a unit the curve never reaches");
+        assert!(
+            raws.windows(2).all(|w| w[0] < w[1]),
+            "ticks out of order: {raws:?}"
         );
     }
 }
